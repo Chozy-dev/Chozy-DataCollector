@@ -1,0 +1,6 @@
+# Copy and fill with reviewed operating values. Examples in API specs are not an operating list.
+categories: []
+# Required: positive integers. No search API limit is assumed for bestcategories.
+max_calls: null
+requests_per_minute: null
+limit: 100

@@ -1,0 +1,23 @@
+# OFFLINE example. Times and allowances require operator review.
+automatic_enabled: false
+require_platform_budget: true
+catchup_days: 1
+poll_seconds: 30
+max_attempts: 3
+retry_seconds: 300
+chunk_size: 500
+scoring_mode: incremental
+comparison_theme: REVIEWED_THEME
+schedules: {} # task: {at: 'HH:MM', every_days: 1}; all times Asia/Seoul
+sources:
+  domeggook:
+    config: domeggook_API/config/config.yaml
+    state_dir: domeggook_API/data/state/stage4
+    account: reviewed-domeme-account
+    private_rpm: 1 # operator allowance, not official provider limit
+    provider_timezone: REVIEW_REQUIRED
+    initial_start: REVIEW_REQUIRED
+  ownerclan: {config: ownerclan_API/config/config.yaml, account: reviewed-owner-account}
+  coupang: {config: coupang_API/config/best.example.yaml, account: reviewed-coupang-account}
+  naver: {config: naver_API/season.example.yaml, account: reviewed-naver-account}
+budgets: [] # {account, api, limits: {second/minute/day/month: positive_integer}, min_interval, platform_integrated: false}

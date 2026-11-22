@@ -1,94 +1,78 @@
 # Product Data Collector
 
-쿠팡 파트너스, 오너클랜 Seller GraphQL API, 도매꾹/도매매 Open API의 상품 데이터를 수집해 PostgreSQL에 저장하는 프로젝트입니다.
+Chozy 상품 수집·변경 이력·공급 점수·시장 스냅샷을 관리하는 Python 프로젝트다. PostgreSQL에 저장한 완료 결과를 Spring Platform이 조회한다.
 
-## 구성
+**LLM에게 프로젝트를 설명할 때는 [docs/CONTEXT.md](docs/CONTEXT.md) 하나만 먼저 전달한다.** 현재 구현, 미완료 기능, 다음 작업, 코드 위치가 들어 있다. 이후 작업에 필요한 코드만 추가하면 된다.
 
-- `ownerclan_API/`: 오너클랜 상품 discovery, 카테고리 수집, 상세 수집, 증분 수집
-- `domeggook_API/`: 도매꾹/도매매 상품 discovery와 상세 수집
-- `coupang_API/`: 쿠팡 파트너스 키워드 검색 상품 수집
-- `product_data_collector/persistence/postgres_storage.py`: 공통 PostgreSQL 스키마 생성, 보강, 저장 로직
-- `product_data_collector/domain/product_history.py`: 변경 감지 대상 필드 정규화 로직
-- `product_data_collector/domain/shipping_fees.py`: 배송비 정규화 로직
-- `docs/schema/`: PostgreSQL 스키마와 저장 규칙
-- `docs/operations/`: 운영 절차와 재개 기준
-- `docs/experiments/`: API 제한, 변화율, 신규 API 검증 결과
-- `tests/`: 단위 테스트와 API probe 스크립트
+## 시작
 
-## 빠른 시작
+Python 3.12와 PostgreSQL 16을 사용한다. 저장소 루트에서 실행한다.
 
 ```powershell
-pip install -r requirements.txt
-docker compose up -d postgres
-python scripts\test_postgres_connection.py
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-dev.txt
+Copy-Item .env.example .env
+python -m pytest -q
 ```
 
-`.env`에는 PostgreSQL과 API 인증값을 설정합니다. 아래 값은 로컬 기본 예시입니다.
+`.env`에 로컬 자격증명을 설정한다. 통합 실행기·migration은 `.env`를 자동으로 읽지 않으며, 실제 실행에는 별도로 지정한 DSN 환경변수가 필요하다.
 
-```dotenv
-COUPANG_ACCESS_KEY=your_coupang_access_key
-COUPANG_SECRET_KEY=your_coupang_secret_key
-DOMEGGOOK_API_KEY_1=your_domeggook_api_key_1
-OWNERCLAN_USERNAME=your_ownerclan_username
-OWNERCLAN_PASSWORD=your_ownerclan_password
-OWNERCLAN_ENV=production
-
-POSTGRES_ENABLED=true
-POSTGRES_HOST=127.0.0.1
-POSTGRES_PORT=5432
-POSTGRES_DB=product_data_collector
-POSTGRES_USER=collector
-POSTGRES_PASSWORD=replace_with_local_password
-POSTGRES_PRODUCT_BATCH_SIZE=1000
-```
-
-도매꾹 private API probe를 실행할 때만 `DOMEGGOOK_PrivateAPI_KEY_2`, `DOMEGGOOK_ID`, `DOMEGGOOK_PASSWORD`를 추가로 사용합니다.
-
-## 일일 실행
+외부 API·DB 연결 없이 통합 실행 계획 확인:
 
 ```powershell
-python scripts\run_daily_collector.py --platform ownerclan
-python scripts\run_daily_collector.py --platform domeggook
-python scripts\run_daily_collector.py --platform coupang
+python -m product_data_collector.operations plan --config product_data_collector/operations/example.yaml
 ```
 
-개별 수집기 실행:
+실제 수집·DB 초기화·migration·복구는 [운영 절차](docs/RUNBOOK.md), 격리 DB 테스트는 [검증](docs/VALIDATION.md)을 따른다.
 
-```powershell
-python -m ownerclan_API
-python -m ownerclan_API --refresh-categories
-python -m ownerclan_API --category-workers 8
-python -m domeggook_API
-python -m domeggook_API --mode daily
-python -m coupang_API
+`docker compose up -d`는 PostgreSQL만 시작한다. 수집 컨테이너를 켜도 실제 API 수집은 시작하지 않으며, 수집은 운영 절차의 명시적 명령으로 실행한다.
+
+## 폴더와 문서
+
+```text
+product_data_collector/   공통 도메인·PostgreSQL 저장·점수·통합 운영
+ownerclan_API/           오너클랜 수집
+domeggook_API/           도매꾹·도매매 수집
+coupang_API/             쿠팡 베스트·기존 검색 수집
+naver_API/               네이버 시즌 키워드·트렌드
+scripts/                개발 실행·DB 확인·내보내기
+  probes/               실제 API 조사 도구
+  benchmarks/           격리 환경의 합성 성능 측정
+tests/
+  unit/                 영역별 오프라인 테스트
+  integration/          격리 PostgreSQL 테스트
+docs/                   현재 기준 문서와 참고 자료
+  references/           전달받은 기획서·설계서·PDF·API 명세 원본
+artifacts/              실행·조사·검증 산출물, Git 제외
+  experiments/          조사별 집계·실측 근거·성능 비교 baseline
+    collection-pipeline-benchmark/  수집·저장·점수 파이프라인 성능
+    scoring-optimization-benchmark/ 점수 최적화 전후 비교
+  samples/              응답 구조 확인용 예시, 제공처별 최대 5개
+  validation/           최신 JUnit·migration 계획·검증 캐시
 ```
 
-dry-run 예시:
+공급처의 `data/`와 기존 `logs/`는 실행 중 사용하는 저장 결과·재개 상태·로그·잠금 경로이며 Git에서 제외한다. 정리 대상으로 일괄 삭제하지 않는다. `scripts/`와 테스트 fixture 소스는 Git으로 관리한다.
 
-```powershell
-python -m ownerclan_API --refresh-categories --limit 1 --dry-run
-python -m domeggook_API --limit 1 --dry-run
-python -m coupang_API --dry-run
-```
+`docs/` 최상위에는 현재 기준 문서 6개를 둔다. 외부 참고 자료 원본은 `docs/references/`에서 Git으로 관리한다. 참고 자료의 과거 설계·수치는 현재 구현 상태로 간주하지 않으며, 현재 상태는 CONTEXT를 따른다.
 
-## 저장 방식
+| 문서 | 내용 |
+| --- | --- |
+| [CONTEXT](docs/CONTEXT.md) | 현재 구현·미완료 기능·다음 작업·코드 위치 |
+| [ARCHITECTURE](docs/ARCHITECTURE.md) | 코드 책임·데이터 흐름·점수 산식·정합성 |
+| [API_CONTRACTS](docs/API_CONTRACTS.md) | 필드 매핑·응답 제약·미확정 API 계약 |
+| [DATABASE](docs/DATABASE.md) | 테이블·조회·migration·백필 |
+| [RUNBOOK](docs/RUNBOOK.md) | 설정·실행·중단·재개·배포 |
+| [VALIDATION](docs/VALIDATION.md) | 검증 명령·최신 결과·실측 조건과 한계 |
 
-운영 저장소는 PostgreSQL입니다. 상품 식별과 master 최신값은 `products`에 저장하고, 가격/재고/배송/상태 같은 추세 대상 값이 최초 수집되었거나 실제 변경된 경우에만 `product_history`를 남깁니다.
+저장소 작업 규칙은 [AGENTS.md](AGENTS.md)를 따른다. 처음에는 README → CONTEXT → 해당 작업의 기준 문서 순서로 읽는다.
 
-원본 API 전체 응답을 장기 보관하지 않습니다. 디버깅용 sample은 `product_raw_samples`에 플랫폼별 최대 100개만 보관하고, discovery/search 순위와 상세 수집 대상 ID는 별도 테이블에 정규화해서 저장합니다.
+파일과 폴더는 기능 이름을 사용한다. schema 모듈은 상품 저장·쿠팡 베스트·네이버 시즌·공급 점수·통합 운영·점수 무효화로 구분하며 [DATABASE](docs/DATABASE.md#migration과-백필)에서 실제 파일을 찾는다. 도매매 전체 적재·변경 동기화는 `workflows/product_sync.py`, CLI는 `workflows/sync_cli.py`다. DB에 기록된 migration 식별자와 기존 재개 경로는 유지한다.
 
-## 문서
+## 로컬 자료 관리
 
-- [운영 런북](docs/operations/RUNBOOK.md): 일일 실행, 백필, 상태 파일, 제한 대응
-- [DB 스키마](docs/schema/DB_SCHEMA.md): 테이블 명세, 저장 흐름, 변경 감지 기준
-- [API 실험 결과](docs/experiments/API_PROBE_RESULTS.md): rate limit, 변화율, `itemHistories` 검증 결과
-- [오너클랜 수집기](ownerclan_API/README.md): Seller GraphQL API 특징과 필드 매핑
-- [도매꾹/도매매 수집기](domeggook_API/README.md): Open API 특징과 필드 매핑
-- [쿠팡 수집기](coupang_API/README.md): Partners API 특징과 필드 매핑
+상품 예시는 필드 형식·옵션·판매 상태를 확인하기 위한 자료다. 정상·품절·판매 종료·옵션 등 서로 다른 사례를 제공처별 최대 5개만 남긴다. 단위 테스트는 코드 안의 작은 fixture를 사용하므로 대량 실상품 표본을 보관할 필요가 없다.
 
-## 테스트
+실험은 `artifacts/experiments/<조사명>/`에 모으고 임시 변환본은 그 안의 `scratch/`에서 작업 후 제거한다. 종료 후 결론과 한계는 VALIDATION에 반영하고 집계·고유 근거만 남긴다. 집계 JSON에 포함된 개별 결과, 이전 JUnit, PDF 추출본·렌더링은 누적 보관하지 않는다. 재현에 필요한 원본과 baseline은 보존하며, 과거 기록의 별도 복구가 필요하면 VALIDATION의 외부 백업 위치를 확인한다.
 
-```powershell
-pytest -q
-python -m compileall product_data_collector
-```
+기능·정책·진척은 해당 기준 문서를 갱신한다. 단계별 완료 보고서나 중복 README, `tmp/`·`archive/` 보관 폴더를 추가하지 않는다.

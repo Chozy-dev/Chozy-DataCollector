@@ -14,6 +14,7 @@ from ..services.parsing import parse_list_header, parse_list_items, parse_produc
 from ..persistence.storage import clear_state, load_state, save_state
 from ..services.time_utils import now_iso
 from product_data_collector.persistence.postgres_storage import (
+    require_database_enabled,
     postgres_enabled,
     save_discovered_product_ids_if_enabled,
     save_discovery_targets_and_search_ranks_if_enabled,
@@ -47,8 +48,6 @@ def discover(
 
     data_dir = project_root / "domeggook_API" / "data"
     categories = load_or_refresh_categories(data_dir / "state" / "categories.json", client, dry_run=dry_run)
-    if category_limit is not None:
-        categories = categories[:category_limit]
 
     state_path = data_dir / "state" / state_filename
     state = load_state(state_path)
@@ -66,8 +65,20 @@ def discover(
 
     positions = _discovery_positions(categories, config, allowed_reasons=allowed_reasons)
     start_index = _discovery_start_index(positions, state)
+    if not dry_run and positions:
+        _save_next_discovery_state(state_path, run_collected_at, positions, start_index, _state_page(state))
+    end_index = len(positions)
+    if category_limit is not None:
+        if category_limit < 1:
+            raise ValueError("category_limit must be positive")
+        selected_codes = set()
+        for index in range(start_index, len(positions)):
+            selected_codes.add(positions[index][0].code)
+            if len(selected_codes) > category_limit:
+                end_index = index
+                break
     save_buffer = _DiscoverySaveBuffer()
-    for position_index, (category, market, reason, sort_code) in enumerate(positions[start_index:], start=start_index):
+    for position_index, (category, market, reason, sort_code) in enumerate(positions[start_index:end_index], start=start_index):
         page = _state_page(state) if position_index == start_index else 1
         pages_for_position = 0
         while True:
@@ -119,6 +130,7 @@ def discover(
 
             if not items:
                 if not dry_run:
+                    inserted_target_count += save_buffer.flush(project_root=project_root, logger=LOGGER)
                     _save_next_discovery_state(state_path, collected_at, positions, position_index, None)
                 break
 
@@ -202,6 +214,8 @@ def discover(
                 _save_next_discovery_state(state_path, collected_at, positions, position_index, page)
         if stopped_on_failure or stopped_on_limit or stopped_on_runtime_limit or stopped_on_daily_request_limit:
             break
+    stopped_on_category_limit = end_index < len(positions)
+    stopped_on_limit = stopped_on_limit or stopped_on_category_limit
     if (
         not dry_run
         and not stopped_on_failure
@@ -213,6 +227,8 @@ def discover(
         clear_state(state_path)
 
     return {
+        "status": "failed" if failures else "paused" if stopped_on_limit or stopped_on_runtime_limit or stopped_on_daily_request_limit else "completed",
+        "reason": "category_limit_reached" if stopped_on_category_limit else "page_limit_reached" if stopped_on_limit else "runtime_limit_reached" if stopped_on_runtime_limit else "daily_request_limit_reached" if stopped_on_daily_request_limit else "range_finished",
         "categoryCount": len(categories),
         "pageCount": page_count,
         "discoveredCount": discovered,
@@ -248,6 +264,7 @@ class _DiscoverySaveBuffer:
     def flush(self, *, project_root: Path, logger: logging.Logger) -> int:
         if not self.discovery_records and not self.search_rank_records:
             return 0
+        require_database_enabled(project_root)
         if postgres_enabled(project_root):
             result = save_discovery_targets_and_search_ranks_if_enabled(
                 project_root=project_root,

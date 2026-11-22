@@ -3,6 +3,7 @@ environment: production
 incremental:
   page_size: 500
   overlap_minutes: 120
+  # Legacy allItems recovery flag only; daily always persists itemHistories.
   include_item_histories: false
 
 request:

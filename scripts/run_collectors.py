@@ -1,3 +1,4 @@
+"""Legacy supervisor; use product_data_collector.operations for integrated collection."""
 from __future__ import annotations
 
 import logging
@@ -107,7 +108,7 @@ def _log_product_counts(label: str) -> None:
 
 def _require_environment() -> None:
     required = [
-        "DOMEGGOOK_API_KEY_1",
+        "DOMEGGOOK_OpenAPI_KEY",
         "OWNERCLAN_USERNAME",
         "OWNERCLAN_PASSWORD",
         "POSTGRES_HOST",

@@ -52,7 +52,8 @@ def run(
                 client=client,
             )
             if (
-                int(details.get("failureCount") or 0)
+                details.get("status") == "paused"
+                or int(details.get("failureCount") or 0)
                 or int(details.get("runtimeLimitReached") or 0)
                 or int(details.get("dailyRequestLimitReached") or 0)
                 or not run_budget.can_call()
@@ -96,7 +97,7 @@ def run(
                 dry_run=dry_run,
                 client=client,
             )
-        if int(discovery.get("runtimeLimitReached") or 0) or int(discovery.get("dailyRequestLimitReached") or 0):
+        if discovery.get("status") in {"failed", "paused"} or int(discovery.get("failureCount") or 0) or int(discovery.get("runtimeLimitReached") or 0) or int(discovery.get("dailyRequestLimitReached") or 0):
             details = {
                 "trackedCount": 0,
                 "collectedProductCount": 0,
@@ -167,6 +168,8 @@ def _empty_recent_discovery(reason: str) -> dict[str, int | str]:
         "runtimeLimitReached": 0,
         "dailyRequestLimitReached": 0,
         "skipReason": reason,
+        "status": "paused",
+        "reason": "daily_request_limit_reached",
     }
 
 

@@ -6,12 +6,12 @@ import sys
 import time
 from pathlib import Path
 
-from product_data_collector.common.collection_state import item_list_hash, resume_index
+from product_data_collector.common.collection_state import collection_outcome, item_list_hash, resume_index, validate_limits
 from ..api.client import DomeggookApiError, DomeggookClient, create_domeggook_client
 from ..config import DomeggookConfig, find_project_root, load_api_keys, load_config
 from ..services.logging_config import configure_logging
 from ..services.parsing import parse_detail_products
-from product_data_collector.persistence.postgres_storage import discovered_product_ids, save_products_with_raw_samples_if_enabled
+from product_data_collector.persistence.postgres_storage import discovered_product_ids, require_product_save, save_products_with_raw_samples_if_enabled
 from .run_budget import RunBudget
 
 from ..persistence.storage import (
@@ -38,11 +38,11 @@ def collect_details(
     dry_run: bool = False,
     client: DomeggookClient | None = None,
 ) -> dict[str, int]:
+    validate_limits(product_limit=product_limit)
     data_dir = project_root / "domeggook_API" / "data"
     if product_ids is None:
-        product_ids = discovered_product_ids(project_root=project_root, platform="domeggook", limit=product_limit)
-    elif product_limit is not None:
-        product_ids = product_ids[:product_limit]
+        product_ids = discovered_product_ids(project_root=project_root, platform="domeggook")
+    product_ids = list(dict.fromkeys(product_ids))
 
     if client is None:
         api_keys = load_api_keys(project_root)
@@ -59,7 +59,12 @@ def collect_details(
     stopped_on_runtime_limit = False
     stopped_on_daily_request_limit = False
 
-    for index in range(start_index, len(product_ids), config.details.batch_size):
+    end_index = len(product_ids) if product_limit is None else min(start_index + max(product_limit, 0), len(product_ids))
+    if not dry_run:
+        state.update(runCollectedAt=collected_at, trackedListHash=list_hash, nextIndex=start_index, rawRemaining=raw_remaining)
+        save_state(state_path, state)
+
+    for index in range(start_index, end_index, config.details.batch_size):
         if _deadline_reached(deadline_monotonic):
             stopped_on_runtime_limit = True
             if not dry_run:
@@ -88,7 +93,7 @@ def collect_details(
                     },
                 )
             break
-        batch = product_ids[index : index + config.details.batch_size]
+        batch = product_ids[index : min(index + config.details.batch_size, end_index)]
         try:
             payload = _get_item_view_with_invalid_json_retries(
                 client,
@@ -113,35 +118,46 @@ def collect_details(
             if product_id is not None:
                 unique_products[str(product_id)] = product
 
+        missing_ids = set(batch) - unique_products.keys() - {str(f.get("productId")) for f in parsed_failures}
+        for product_id in sorted(missing_ids):
+            failure = {"productId": product_id, "error": "Requested product missing from detail response"}
+            parsed_failures.append(failure)
+            failures.append(failure)
         if not dry_run and unique_products:
+            # On failure the durable checkpoint still points at this request.
             _save_domeggook_detail_batch(
-                project_root=project_root,
-                config=config,
-                collected_at=collected_at,
-                products=unique_products,
-                raw_limit=raw_remaining,
+                project_root=project_root, config=config, collected_at=collected_at,
+                products=unique_products, raw_limit=raw_remaining,
             )
+
         collected_product_count += len(unique_products)
-        raw_remaining = max(raw_remaining - len(unique_products), 0)
+        raw_remaining = max(raw_remaining - sum(p.get("raw") is not None for p in unique_products.values()), 0)
         if parsed_failures:
             break
         if not dry_run:
-            next_index = min(index + config.details.batch_size, len(product_ids))
+            next_index = index + len(batch)
+            state = {
+                "runCollectedAt": collected_at,
+                "trackedListHash": list_hash,
+                "nextIndex": next_index,
+                "lastCompletedProductId": batch[-1],
+                "rawRemaining": raw_remaining,
+            }
             save_state(
                 state_path,
-                {
-                    "runCollectedAt": collected_at,
-                    "trackedListHash": list_hash,
-                    "nextIndex": next_index,
-                    "lastCompletedProductId": batch[-1],
-                    "rawRemaining": raw_remaining,
-                },
+                state,
             )
 
-    if not dry_run and not failures and not stopped_on_runtime_limit and not stopped_on_daily_request_limit:
+    pause_reason = (
+        "runtime_limit_reached" if stopped_on_runtime_limit else
+        "daily_request_limit_reached" if stopped_on_daily_request_limit else
+        "item_limit_reached" if end_index < len(product_ids) else None
+    )
+    if not dry_run and not failures and not pause_reason:
         clear_state(state_path)
 
     return {
+        **collection_outcome(failed=bool(failures), pause_reason=pause_reason),
         "trackedCount": len(product_ids),
         "collectedProductCount": collected_product_count,
         "successCount": collected_product_count,
@@ -191,7 +207,7 @@ def _save_domeggook_detail_batch(
     products: dict[str, dict[str, object]],
     raw_limit: int,
 ) -> None:
-    save_products_with_raw_samples_if_enabled(
+    result = save_products_with_raw_samples_if_enabled(
         project_root=project_root,
         platform="domeggook",
         collected_at=collected_at,
@@ -199,6 +215,7 @@ def _save_domeggook_detail_batch(
         raw_sample_limit=raw_limit,
         logger=LOGGER,
     )
+    require_product_save(result, products.values())
 
 
 def _raw_remaining(state: dict[str, object], default: int) -> int:
@@ -228,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(Path(args.config) if args.config else project_root / "domeggook_API" / "config" / "config.yaml")
     result = collect_details(project_root, config, product_limit=args.limit, dry_run=args.dry_run)
     print(result)
-    return 1 if result["failureCount"] and not result["successCount"] else 0
+    return 1 if result["failureCount"] else 0
 
 
 if __name__ == "__main__":

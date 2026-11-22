@@ -170,6 +170,7 @@ def parse_detail_product(item: dict[str, Any], collected_at: str, *, include_raw
             "supplyOnSale": _coalesce(_get(channel, "supply"), _get(supply, "onSale", "isSale", "enabled")),
         },
         "options": _select_options(item.get("selectOpt")),
+        "optionsComplete": item.get("optionsComplete") is True,
         "seller": {
             "id": _get(seller, "id", "sellerId", "userId"),
             "nickname": _get(seller, "nick", "nickname", "sellerNick"),
@@ -399,6 +400,7 @@ def _select_options(value: Any) -> list[dict[str, Any]]:
             "samplePrice": _number_or_none(option.get("samPrice")),
             "hiddenStatus": _number_or_none(option.get("hid")),
             "hash": _text_or_none(option.get("hash")),
+            "sourceOption": {"reference": str(key), **copy.deepcopy(option)},
         }
         rows.append({key: value for key, value in row.items() if value is not None and value != []})
     return rows

@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Local performance measurements
+psutil>=5.9

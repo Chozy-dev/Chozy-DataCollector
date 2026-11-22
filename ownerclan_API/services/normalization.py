@@ -18,8 +18,10 @@ STATUS_MAP = {
 def extract_connection_items(connection: dict[str, Any], root_key: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     root = connection.get(root_key)
     if not isinstance(root, dict):
-        return [], {}
+        raise ValueError(f"Missing connection in API response: {root_key}")
     page_info = root.get("pageInfo") if isinstance(root.get("pageInfo"), dict) else {}
+    if not isinstance(page_info.get("hasNextPage"), bool) or not isinstance(root.get("edges"), list):
+        raise ValueError(f"Invalid connection in API response: {root_key}")
     items: list[dict[str, Any]] = []
     for edge in root.get("edges") or []:
         if isinstance(edge, dict) and isinstance(edge.get("node"), dict):
@@ -27,6 +29,8 @@ def extract_connection_items(connection: dict[str, Any], root_key: str) -> tuple
             if edge.get("cursor") is not None:
                 node["_cursor"] = edge.get("cursor")
             items.append(node)
+        else:
+            raise ValueError(f"Invalid edge in API response: {root_key}")
     return items, page_info
 
 
@@ -59,6 +63,10 @@ def normalize_item(item: dict[str, Any], collected_at: str) -> dict[str, Any]:
             "apiStockQuantity": number_or_original(item.get("quantity")),
         },
         "options": options,
+        # GraphQL options is an unpaginated array selected in both item queries.
+        # Callers passing a partial/filtered list must explicitly set False.
+        "optionsComplete": item.get("optionsComplete", isinstance(item.get("options"), list)
+                                    and all(isinstance(o, dict) for o in item["options"])) is True,
         "shipping": {
             "fee": number_or_original(item.get("shippingFee")),
             "feeRaw": item.get("shippingFee"),
@@ -95,6 +103,11 @@ def normalize_item(item: dict[str, Any], collected_at: str) -> dict[str, Any]:
             "attributes": item.get("attributes"),
             "closingTime": item.get("closingTime"),
             "vendorKey": _metadata_value(metadata, "vendorKey"),
+            "coupangCategoryFullName": _metadata_value(metadata, "coupangCategoryFullName"),
+            "smartstoreCategoryCode": _metadata_value(metadata, "smartstoreCategoryCode"),
+            "production": item.get("production"),
+            "origin": item.get("origin"),
+            "model": item.get("model"),
             "vendorNotice": _metadata_value(metadata, "vendorNotice"),
             "returnAddressCode": _metadata_value(metadata, "returnAddressCode"),
             "certificateInformation": _metadata_value(metadata, "certificateInformation"),
@@ -136,6 +149,9 @@ def normalize_options(value: Any) -> list[dict[str, Any]]:
                 "optionAttributes": normalized_attrs,
                 "price": number_or_original(option.get("price")),
                 "quantity": number_or_original(option.get("quantity")),
+                "status": option.get("status"),
+                "name": option.get("name"),
+                "sourceOption": copy.deepcopy(option),
             }
         )
     return options
@@ -151,6 +167,8 @@ def calculate_total_stock(options: list[dict[str, Any]]) -> int | None:
             quantities.append(int(quantity))
         elif isinstance(quantity, str) and quantity.strip().isdigit():
             quantities.append(int(quantity.strip()))
+    if 9999 in quantities:
+        return 9999
     return sum(quantities) if quantities else None
 
 

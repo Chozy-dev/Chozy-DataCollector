@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +11,7 @@ class Checkpoint:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.completed_keywords: set[str] = set()
+        self.run_collected_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     @classmethod
     def load(cls, path: Path) -> "Checkpoint":
@@ -18,6 +21,7 @@ class Checkpoint:
 
         with path.open("r", encoding="utf-8") as fp:
             payload = json.load(fp)
+        checkpoint.run_collected_at = payload.get("runCollectedAt") or checkpoint.run_collected_at
         completed = payload.get("completedKeywords", [])
         if isinstance(completed, list):
             checkpoint.completed_keywords = {item for item in completed if isinstance(item, str)}
@@ -27,16 +31,23 @@ class Checkpoint:
         return keyword in self.completed_keywords
 
     def mark_completed(self, keyword: str) -> None:
+        previous = self.completed_keywords.copy()
         self.completed_keywords.add(keyword)
-        self.save()
+        try:
+            self.save()
+        except Exception:
+            self.completed_keywords = previous
+            raise
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload: dict[str, Any] = {"completedKeywords": sorted(self.completed_keywords)}
+        payload: dict[str, Any] = {"completedKeywords": sorted(self.completed_keywords), "runCollectedAt": self.run_collected_at}
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
         with tmp_path.open("w", encoding="utf-8") as fp:
             json.dump(payload, fp, ensure_ascii=False, indent=2, sort_keys=True)
             fp.write("\n")
+            fp.flush()
+            os.fsync(fp.fileno())
         tmp_path.replace(self.path)
 
     def clear(self) -> None:

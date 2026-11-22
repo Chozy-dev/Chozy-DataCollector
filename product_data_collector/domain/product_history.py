@@ -47,6 +47,9 @@ TRACKING_QUERY_KEYS = {
     "traceid",
 }
 COMPARABLE_KEYS = ("prices", "inventory", "shipping", "options", "status", "sourceStatus", "markets")
+# These are labels from the source, even when they consist only of digits.
+# In particular, option keys "001" and "1" must remain different observations.
+IDENTIFIER_KEYS = {"skuKey", "key", "optionKey", "reference", "hash"}
 EXPECTED_SECTION_FIELDS = {
     "inventory": (
         "stockQuantity",
@@ -114,7 +117,7 @@ def comparable_state(product: dict[str, Any]) -> dict[str, Any]:
 def canonicalize(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            str(key).strip(): canonicalize(child)
+            str(key).strip(): child if str(key) in IDENTIFIER_KEYS else canonicalize(child)
             for key, child in sorted(value.items(), key=lambda item: str(item[0]).strip())
             if str(key) not in VOLATILE_KEYS
         }

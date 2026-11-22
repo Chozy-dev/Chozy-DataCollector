@@ -1,0 +1,13 @@
+# Illustrative codes only: operators must review all monthly product themes.
+# Missing YYYY-MM entries fail closed. month is the API target month.
+months:
+  '2026-11':
+    - {event: 6, name: '난방/방한 (검토 필요)', month: 11}
+    - {event: 5, name: '예시 테마 5 (검토 필요)', month: 11}
+    - {event: 8, name: '예시 테마 8 (검토 필요)', month: 11}
+limits:
+  ad_daily_calls: 3
+  trend_daily_calls: 6
+  trend_monthly_calls: 186
+  ad_interval_seconds: 1
+  trend_interval_seconds: 1

@@ -12,7 +12,7 @@ from ..config import CollectorConfig, load_config, load_credentials, load_keywor
 from ..services.models import parse_product_records
 from ..api.rate_limiter import RateLimiter
 from ..persistence.storage import dedupe_records
-from product_data_collector.persistence.postgres_storage import MAX_RAW_SAMPLE_RETENTION, save_products_with_raw_samples_if_enabled
+from product_data_collector.persistence.postgres_storage import MAX_RAW_SAMPLE_RETENTION, require_product_save, save_products_with_raw_samples_if_enabled
 
 
 LOGGER = logging.getLogger("coupang_API")
@@ -28,13 +28,15 @@ def collect_once(project_root: Path, config: CollectorConfig, *, dry_run: bool =
     keywords = load_keywords(project_root / "coupang_API" / "config" / "keywords.txt")
     started_at = datetime.now(timezone.utc)
     checkpoint = Checkpoint.load(project_root / "coupang_API" / "data" / "state" / "product_search_checkpoint.json")
+    if not dry_run:
+        checkpoint.save()
     success_keywords: list[str] = []
     failure_keywords: list[str] = []
     skipped_keywords = [keyword for keyword in keywords if checkpoint.is_completed(keyword)]
     keyword_scoped_product_count = 0
     duplicate_products = 0
     raw_saved_count = 0
-    raw_sample_limit = 0 if config.raw_sample_limit <= 0 else MAX_RAW_SAMPLE_RETENTION
+    raw_sample_limit = min(max(config.raw_sample_limit, 0), MAX_RAW_SAMPLE_RETENTION)
     collected_products: dict[str, dict[str, object]] = {}
 
     LOGGER.info(
@@ -55,7 +57,7 @@ def collect_once(project_root: Path, config: CollectorConfig, *, dry_run: bool =
             srp_link_only=False,
             sub_id=config.sub_id,
         )
-        collected_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        collected_at = checkpoint.run_collected_at
         try:
             payload = client.search_products(request)
             records = parse_product_records(
@@ -67,6 +69,7 @@ def collect_once(project_root: Path, config: CollectorConfig, *, dry_run: bool =
             duplicates = len(records) - len(unique_records)
             keyword_scoped_product_count += len(unique_records)
             duplicate_products += duplicates
+            keyword_products = {}
             for record in unique_records:
                 product_id = record.get("productId")
                 if product_id not in (None, ""):
@@ -77,9 +80,19 @@ def collect_once(project_root: Path, config: CollectorConfig, *, dry_run: bool =
                     existing = collected_products.get(str(product_id))
                     if existing and existing.get("raw") is not None and record.get("raw") is None:
                         record = {**record, "raw": existing["raw"]}
-                    collected_products[str(product_id)] = record
+                    keyword_products[str(product_id)] = record
             if not dry_run:
+                result = save_products_with_raw_samples_if_enabled(
+                    project_root=project_root,
+                    platform="coupang",
+                    collected_at=collected_at,
+                    products=keyword_products.values(),
+                    raw_sample_limit=raw_sample_limit,
+                    logger=LOGGER,
+                )
+                require_product_save(result, keyword_products.values())
                 checkpoint.mark_completed(keyword)
+            collected_products.update(keyword_products)
             success_keywords.append(keyword)
             LOGGER.info("success keyword=%r keywordScopedProducts=%d duplicates=%d", keyword, len(unique_records), duplicates)
         except CoupangApiError as exc:
@@ -93,16 +106,6 @@ def collect_once(project_root: Path, config: CollectorConfig, *, dry_run: bool =
     all_completed = len(checkpoint.completed_keywords.intersection(keywords)) == len(keywords)
     if all_completed and not failure_keywords and not dry_run:
         checkpoint.clear()
-    collected_at = ended_at.isoformat().replace("+00:00", "Z")
-    if not dry_run:
-        save_products_with_raw_samples_if_enabled(
-            project_root=project_root,
-            platform="coupang",
-            collected_at=collected_at,
-            products=collected_products.values(),
-            raw_sample_limit=config.raw_sample_limit,
-            logger=LOGGER,
-        )
 
     summary = {
         "runStartedAt": started_at.isoformat().replace("+00:00", "Z"),

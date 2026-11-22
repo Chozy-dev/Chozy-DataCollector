@@ -13,6 +13,7 @@ from ..api.rate_limiter import RateLimiter
 
 BASE_URL = "https://api-gateway.coupang.com"
 SEARCH_ENDPOINT = "/v2/providers/affiliate_open_api/apis/openapi/products/search"
+BEST_ENDPOINT = "/v2/providers/affiliate_open_api/apis/openapi/products/bestcategories"
 
 
 class CoupangApiError(Exception):
@@ -41,6 +42,20 @@ class SearchRequest:
     sub_id: str | None = None
 
 
+@dataclass(frozen=True)
+class BestCategoryRequest:
+    category_id: int
+    limit: int = 100
+
+
+def build_best_uri(request: BestCategoryRequest) -> str:
+    if type(request.category_id) is not int or request.category_id <= 0:
+        raise ValueError("category_id must be a positive integer")
+    if type(request.limit) is not int or not 1 <= request.limit <= 100:
+        raise ValueError("best limit must be between 1 and 100")
+    return f"{BEST_ENDPOINT}/{request.category_id}?limit={request.limit}"
+
+
 class CoupangPartnersClient:
     def __init__(
         self,
@@ -53,15 +68,24 @@ class CoupangPartnersClient:
     ) -> None:
         self._access_key = access_key
         self._secret_key = secret_key
+        self._explicit_rate_limiter = rate_limiter is not None
         self._rate_limiter = rate_limiter or RateLimiter(max_calls=40, period_seconds=60.0)
         self._timeout = timeout
         self._max_retries = max_retries
         self._session = session or requests.Session()
 
     def search_products(self, request: SearchRequest) -> dict[str, Any]:
-        uri = build_search_uri(request)
+        return self._get(build_search_uri(request))
+
+    def best_products(self, request: BestCategoryRequest) -> dict[str, Any]:
+        # One HTTP attempt: the daily workflow reserves every call durably.
+        if not self._explicit_rate_limiter:
+            raise ValueError("Best API requires an explicitly configured rate limiter")
+        return self._get(build_best_uri(request), attempts=1)
+
+    def _get(self, uri: str, attempts: int | None = None) -> dict[str, Any]:
         url = f"{BASE_URL}{uri}"
-        attempts = self._max_retries + 1
+        attempts = attempts or self._max_retries + 1
 
         for attempt in range(1, attempts + 1):
             self._rate_limiter.wait()
@@ -94,7 +118,12 @@ class CoupangPartnersClient:
             if response.status_code >= 400:
                 raise CoupangHttpError(response.status_code, _safe_response_message(response))
 
-            payload = response.json()
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise CoupangApiError("Invalid JSON response") from exc
+            if not isinstance(payload, dict):
+                raise CoupangApiError("Invalid response envelope")
             r_code = payload.get("rCode")
             if str(r_code) != "0":
                 raise CoupangResponseError(None if r_code is None else str(r_code), payload.get("rMessage"))
