@@ -154,7 +154,7 @@ def load_keywords(path: Path) -> list[str]:
 
 def load_api_keys(project_root: Path) -> list[str]:
     load_dotenv(project_root / ".env", override=False)
-    primary_api_key = os.getenv("DOMEGGOOK_API_KEY_1")
+    primary_api_key = os.getenv("DOMEGGOOK_OpenAPI_KEY")
     if primary_api_key:
         return [primary_api_key]
 
@@ -163,7 +163,7 @@ def load_api_keys(project_root: Path) -> list[str]:
         return [legacy_api_key]
 
     raise RuntimeError(
-        "missing required environment variable: DOMEGGOOK_API_KEY_1 "
+        "missing required environment variable: DOMEGGOOK_OpenAPI_KEY "
         "(legacy fallback: DOMEGGOOK_API_KEY)"
     )
 

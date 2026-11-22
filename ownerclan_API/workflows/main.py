@@ -36,8 +36,29 @@ def run(
     failure_retry_seconds: int = 300,
     max_failure_restarts: int = 10,
     category_workers: int = 1,
+    mode: str = "daily",
+    date_from: str | None = None,
+    date_to: str | None = None,
 ) -> dict[str, dict[str, int]]:
     config = load_config(config_path, project_root)
+    if mode != "legacy-categories":
+        from .bootstrap import bootstrap
+        from .history_sync import refresh_details
+        if mode not in {"daily", "bootstrap", "discovery", "recovery", "backfill", "refresh"}:
+            raise ValueError("Invalid Ownerclan mode")
+        # Each source traversal owns its own checkpoint lock. Detail workers use
+        # DB leases and may run concurrently with any source mode.
+        results = {}
+        if mode in {"bootstrap", "discovery", "recovery"}:
+            results[mode] = bootstrap(project_root, config, mode=mode, page_limit=limit, dry_run=dry_run)
+        elif mode != "refresh":
+            results["incremental" if mode == "daily" else mode] = sync_incremental(
+                project_root, config, page_limit=limit, item_limit=limit, dry_run=dry_run,
+                date_from=date_from, date_to=date_to,
+                **({"mode": "backfill"} if mode == "backfill" else {}))
+        if not dry_run and mode != "backfill":
+            results["refresh"] = refresh_details(project_root, config, limit=limit)
+        return results
     with FileLock(config.output.log_dir / "collector.lock"):
         category_failure_restarts = 0
         incremental_failure_restarts = 0
@@ -77,7 +98,7 @@ def run(
                 _sleep_before_retry("categoryCollection", failure_retry_seconds, category_failure_restarts)
                 refresh_categories = False
                 continue
-            if category_collection["failureCount"]:
+            if category_collection["failureCount"] or category_collection.get("status") == "paused":
                 return {
                     "categoryCollection": category_collection,
                     "incremental": dict(EMPTY_INCREMENTAL_RESULT),
@@ -105,8 +126,11 @@ def run(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run Ownerclan category collection and incremental sync.")
+    parser = argparse.ArgumentParser(description="Run Ownerclan history sync, detail refresh, or catalogue recovery.")
     parser.add_argument("--config", default=None)
+    parser.add_argument("--mode", choices=("daily", "bootstrap", "discovery", "recovery", "backfill", "refresh", "legacy-categories"), default="daily")
+    parser.add_argument("--date-from", help="Timezone-aware history range start (backfill/daily)")
+    parser.add_argument("--date-to", help="Timezone-aware fixed history range end (backfill/daily)")
     parser.add_argument("--limit", type=int, default=None, help="Limit categories, collected items, and incremental pages/items for a small real API run.")
     parser.add_argument("--refresh-categories", action="store_true", help="Refresh the leaf category cache before collecting.")
     parser.add_argument("--dry-run", action="store_true", help="Call API but do not write data files.")
@@ -150,10 +174,12 @@ def main(argv: list[str] | None = None) -> int:
         failure_retry_seconds=max(args.failure_retry_seconds, 0),
         max_failure_restarts=max(args.max_failure_restarts, 0),
         category_workers=max(args.category_workers, 1),
+        mode=args.mode,
+        date_from=args.date_from,
+        date_to=args.date_to,
     )
     print("Ownerclan collection summary")
-    print(f"categoryCollection={result['categoryCollection']}")
-    print(f"incremental={result['incremental']}")
+    print(result)
     return 1 if any(stage["failureCount"] for stage in result.values()) else 0
 
 

@@ -24,6 +24,24 @@ class DomeggookApiError(Exception):
     pass
 
 
+class CallBudgetExhausted(DomeggookApiError):
+    pass
+
+
+class DomeggookTimeoutError(DomeggookApiError):
+    pass
+
+
+def consume_budget(budget):
+    if budget is not None:
+        if hasattr(budget, "reserve_call"):
+            budget.reserve_call()
+            return
+        if not budget.can_call():
+            raise CallBudgetExhausted("API call budget exhausted")
+        budget.record_call()
+
+
 class DomeggookHttpError(DomeggookApiError):
     def __init__(self, status_code: int, message: str) -> None:
         super().__init__(f"HTTP {status_code}: {message}")
@@ -62,6 +80,7 @@ class DomeggookClient:
         timeout_seconds: float = 20,
         max_retries: int = 3,
         session: requests.Session | None = None,
+        request_budget=None,
     ) -> None:
         self._credentials = _build_credentials(api_key, rate_limiter)
         self._credential_cycle = cycle(self._credentials)
@@ -70,6 +89,7 @@ class DomeggookClient:
         self._max_retries = max_retries
         self._session = session or requests.Session()
         self._metrics = ApiMetrics("domeggook", LOGGER)
+        self.request_budget = request_budget
 
     def get_item_list(self, request: ListRequest) -> dict[str, Any]:
         if not request.keyword and not request.category_code:
@@ -100,6 +120,7 @@ class DomeggookClient:
             "om": "json",
             "no": ",".join(product_ids),
             "multiple": "true",
+            "market": "supply",
         }
         return self._get(params)
 
@@ -120,6 +141,7 @@ class DomeggookClient:
 
         for attempt in range(1, attempts + 1):
             credential.rate_limiter.wait()
+            consume_budget(self.request_budget)
             url = f"{BASE_URL}?{urlencode(request_params)}"
             try:
                 response = self._session.get(url, timeout=self._timeout)
@@ -133,7 +155,8 @@ class DomeggookClient:
                     exc.__class__.__name__,
                 )
                 if attempt >= attempts:
-                    raise DomeggookApiError(f"network error: {exc.__class__.__name__}") from exc
+                    error_type = DomeggookTimeoutError if isinstance(exc, requests.Timeout) else DomeggookApiError
+                    raise error_type(f"network error: {exc.__class__.__name__}") from None
                 time.sleep(min(2 ** (attempt - 1), 30))
                 continue
 

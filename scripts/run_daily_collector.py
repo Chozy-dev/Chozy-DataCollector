@@ -1,3 +1,4 @@
+"""Legacy sampling runner; integrated entry point: product_data_collector.operations."""
 from __future__ import annotations
 
 import argparse
@@ -98,7 +99,7 @@ def _exit_code(platform: str, result: Any) -> int:
     if not isinstance(result, dict):
         return 1
     for stage in result.values():
-        if isinstance(stage, dict) and int(stage.get("failureCount") or 0) > 0:
+        if isinstance(stage, dict) and (stage.get("status") == "failed" or int(stage.get("failureCount") or 0) > 0):
             return 1
     return 0
 
@@ -106,7 +107,7 @@ def _exit_code(platform: str, result: Any) -> int:
 def _status(platform: str, result: Any, exit_code: int) -> str:
     if exit_code:
         return "failed"
-    if platform == "domeggook" and (_runtime_limit_reached(result) or _daily_request_limit_reached(result)):
+    if _paused_stage(result) or _runtime_limit_reached(result) or _daily_request_limit_reached(result):
         return "paused"
     return "completed"
 
@@ -116,17 +117,26 @@ def _reason(platform: str, result: Any, exit_code: int) -> str:
         if platform == "ownerclan" and _rate_limit_failure(result):
             return "rate_limit_retry_exhausted"
         return "failure"
+    paused = _paused_stage(result)
+    if paused:
+        return str(paused.get("reason") or "incomplete")
     if platform == "domeggook" and _runtime_limit_reached(result):
         return "runtime_limit_reached"
     if platform == "domeggook" and _daily_request_limit_reached(result):
         return "daily_request_limit_reached"
     if platform == "ownerclan":
-        return "all_categories_finished"
+        return "ownerclan_history_and_refresh_finished"
     if platform == "domeggook":
         if _recent_discovery_ran(result):
             return "all_domeggook_details_finished_and_recent_products_checked"
         return "all_domeggook_details_finished"
     return "all_coupang_keywords_finished"
+
+
+def _paused_stage(result: Any) -> dict[str, Any] | None:
+    if isinstance(result, dict):
+        return next((stage for stage in result.values() if isinstance(stage, dict) and stage.get("status") == "paused"), None)
+    return None
 
 
 def _runtime_limit_reached(result: Any) -> bool:

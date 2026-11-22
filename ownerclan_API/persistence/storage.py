@@ -7,6 +7,35 @@ import time
 from pathlib import Path
 from typing import Any
 
+
+class CheckpointLock:
+    """OS-owned lock: process death releases it; never unlink a locked inode."""
+    def __init__(self, path: Path):
+        self.path = path
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.file = self.path.open("a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                self.file.seek(0)
+                if not self.file.read(1):
+                    self.file.write(b"0")
+                    self.file.flush()
+                self.file.seek(0)
+                msvcrt.locking(self.file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            self.file.close()
+            raise RuntimeError(f"Checkpoint already in use: {self.path.name}") from exc
+        return self
+
+    def __exit__(self, *args):
+        self.file.close()
+
 class FileLock:
     def __init__(self, path: Path, stale_after_seconds: float = 12 * 60 * 60) -> None:
         self.path = path

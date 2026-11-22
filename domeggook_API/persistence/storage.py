@@ -2,48 +2,47 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from pathlib import Path
 from typing import Any
 
 
 class FileLock:
+    """Process-owned lock; a leftover file never blocks a restarted collector."""
+
     def __init__(self, path: Path, stale_after_seconds: float = 12 * 60 * 60) -> None:
         self.path = path
+        # Retain the argument for callers; lock ownership no longer expires by age.
         self.stale_after_seconds = stale_after_seconds
-        self._fd: int | None = None
+        self._file = None
 
     def __enter__(self) -> "FileLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._remove_stale_lock()
+        self._file = self.path.open("a+b")
         try:
-            self._fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as exc:
+            if os.name == "nt":
+                import msvcrt
+
+                self._file.seek(0)
+                if not self._file.read(1):
+                    self._file.write(b"0")
+                    self._file.flush()
+                self._file.seek(0)
+                msvcrt.locking(self._file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            self._file.close()
+            self._file = None
             raise RuntimeError(f"another domeggook_API collection appears to be running: {self.path}") from exc
-        os.write(self._fd, str(os.getpid()).encode("ascii"))
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        if self._fd is not None:
-            os.close(self._fd)
-            self._fd = None
-        try:
-            self.path.unlink()
-        except FileNotFoundError:
-            pass
-
-    def _remove_stale_lock(self) -> None:
-        if self.stale_after_seconds <= 0 or not self.path.exists():
-            return
-        try:
-            age_seconds = time.time() - self.path.stat().st_mtime
-        except FileNotFoundError:
-            return
-        if age_seconds > self.stale_after_seconds:
-            try:
-                self.path.unlink()
-            except FileNotFoundError:
-                pass
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+        # Keep the inode: unlinking it could let two processes lock different files.
 
 
 def atomic_write_json(path: Path, payload: Any) -> None:

@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from product_data_collector.persistence.postgres_storage import save_products_with_raw_samples_if_enabled
+from product_data_collector.persistence.postgres_storage import require_product_save, save_products_with_raw_samples_if_enabled
+
+from product_data_collector.common.collection_state import collection_outcome, next_page_cursor, validate_limits
 
 from ..api.client import OwnerclanGraphQLError, OwnerclanHttpError
 from ..config import OwnerclanConfig, find_project_root, load_config
@@ -26,7 +28,13 @@ from ..services.time_utils import now_iso, to_unix_millis
 LOGGER = logging.getLogger("ownerclan_API.workflows.sync_incremental")
 
 
-def sync_incremental(
+def sync_incremental(project_root, config, **kwargs):
+    """Daily default: source histories only; detail completion is independent."""
+    from .history_sync import collect_history
+    return collect_history(project_root, config, **kwargs)
+
+
+def sync_all_items_legacy(
     project_root: Path,
     config: OwnerclanConfig,
     *,
@@ -35,76 +43,84 @@ def sync_incremental(
     dry_run: bool = False,
     client: Any | None = None,
 ) -> dict[str, int]:
+    validate_limits(page_limit=page_limit, item_limit=item_limit)
     client = client or make_client(project_root, config)
     collected_at = now_iso(config.timezone)
-    state_path = config.output.state_dir / "incremental-state.json"
+    state_path = config.output.state_dir / "legacy-all-items-state.json"
     state = load_state(state_path)
-    date_to_iso = collected_at
-    date_from_iso = _incremental_from(state.get("lastSuccessfulItemSyncAt"), config)
+    pending = state.get("pendingIncremental") or {}
+    date_to_iso = str(pending.get("dateTo") or collected_at)
+    date_from_iso = str(pending.get("dateFrom") or _incremental_from(state.get("lastSuccessfulItemSyncAt"), config))
+    collected_at = str(pending.get("runCollectedAt") or collected_at)
     date_from = to_unix_millis(date_from_iso)
     date_to = to_unix_millis(date_to_iso)
-
+    after = pending.get("after")
+    completed = bool(pending.get("itemsCompleted"))
     products: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     rate_limit_failures = 0
-    seen_keys: set[tuple[str, Any]] = set()
-    after: str | None = None
     seen_cursors: set[str] = set()
     pages = 0
-    completed = False
+    pause_reason = None
 
+    def checkpoint_page(cursor, items_completed=False):
+        state["pendingIncremental"] = {
+            "runCollectedAt": collected_at, "dateFrom": date_from_iso,
+            "dateTo": date_to_iso, "after": cursor, "itemsCompleted": items_completed,
+        }
+        save_state(state_path, state)
+
+    if not dry_run:
+        checkpoint_page(after, completed)
     try:
-        while True:
-            query = all_items_query(
-                first=config.incremental.page_size,
-                sort_by="dateAsc",
-                after=after,
-                date_from=date_from,
-                date_to=date_to,
-            )
+        while not completed:
             try:
-                data = client.graphql(query)
+                data = client.graphql(all_items_query(
+                    first=config.incremental.page_size, sort_by="dateAsc",
+                    after=after, date_from=date_from, date_to=date_to,
+                ))
             except OwnerclanGraphQLError as exc:
                 if not exc.looks_like_unknown_field() or "allitems" in str(exc).lower():
                     raise
-                data = client.graphql(
-                    all_items_query(
-                        first=config.incremental.page_size,
-                        sort_by="dateAsc",
-                        after=after,
-                        date_from=date_from,
-                        date_to=date_to,
-                        minimal=True,
-                    )
-                )
+                data = client.graphql(all_items_query(
+                    first=config.incremental.page_size, sort_by="dateAsc",
+                    after=after, date_from=date_from, date_to=date_to, minimal=True,
+                ))
             items, page_info = extract_connection_items(data, "allItems")
+            next_cursor = next_page_cursor(page_info, after, seen_cursors)
             pages += 1
-            for item in items:
-                key = str(item.get("key") or "")
-                dedupe_key = (key, item.get("updatedAt"))
-                if key and dedupe_key not in seen_keys:
-                    seen_keys.add(dedupe_key)
-                    products.append(normalize_item(item, collected_at))
-                    if item_limit is not None and len(products) >= item_limit:
-                        LOGGER.info("stopping ownerclan incremental sync at item_limit=%d", item_limit)
-                        completed = True
-                        break
+            selected = items
+            if item_limit is not None:
+                selected = items[:max(item_limit - len(products), 0)]
+            if len(selected) < len(items):
+                if not selected or not selected[-1].get("_cursor"):
+                    raise ValueError("Cannot resume a partially consumed page without an edge cursor")
+                next_cursor = str(selected[-1]["_cursor"])
+                if next_cursor == after or next_cursor in seen_cursors:
+                    raise ValueError("Repeated partial-page cursor")
+            if any(not item.get("key") for item in selected):
+                raise ValueError("Ownerclan item missing key")
+            page_products = [normalize_item(item, collected_at) for item in selected]
+            if not dry_run:
+                result = save_products_with_raw_samples_if_enabled(
+                    project_root=project_root, platform="ownerclan",
+                    collected_at=collected_at, products=page_products,
+                    raw_sample_limit=config.output.raw_sample_limit, logger=LOGGER,
+                )
+                require_product_save(result, page_products)
+                checkpoint_page(next_cursor, next_cursor is None)
+            products.extend(page_products)
+            completed = next_cursor is None
             if completed:
                 break
-            next_cursor = page_info.get("endCursor")
-            if not page_info.get("hasNextPage") or not next_cursor:
-                completed = True
+            after = next_cursor
+            seen_cursors.add(next_cursor)
+            if item_limit is not None and len(products) >= item_limit:
+                pause_reason = "item_limit_reached"
                 break
             if page_limit is not None and pages >= page_limit:
-                LOGGER.info("stopping ownerclan incremental sync at page_limit=%d", page_limit)
-                completed = True
+                pause_reason = "page_limit_reached"
                 break
-            if str(next_cursor) in seen_cursors or next_cursor == after:
-                LOGGER.warning("stopping ownerclan incremental pagination due to repeated cursor=%s", next_cursor)
-                completed = True
-                break
-            seen_cursors.add(str(next_cursor))
-            after = str(next_cursor)
     except Exception as exc:
         if _is_rate_limit_exception(exc):
             rate_limit_failures += 1
@@ -112,34 +128,29 @@ def sync_incremental(
         LOGGER.error("ownerclan incremental sync failed error=%s", exc)
 
     histories = []
-    if completed and config.incremental.include_item_histories:
+    if completed and not failures and config.incremental.include_item_histories:
         try:
             histories = fetch_item_histories(client, config, date_from, date_to)
         except Exception as exc:
             failures.append({"error": str(exc), "stage": "itemHistories", "dateFrom": date_from, "dateTo": date_to})
             LOGGER.error("ownerclan itemHistories sync failed error=%s", exc)
 
-    if not dry_run:
-        save_products_with_raw_samples_if_enabled(
-            project_root=project_root,
-            platform="ownerclan",
-            collected_at=collected_at,
-            products=products,
-            raw_sample_limit=config.output.raw_sample_limit,
-            logger=LOGGER,
-        )
-        if completed and not failures:
-            state["lastSuccessfulItemSyncAt"] = date_to_iso
-            save_state(state_path, state)
+    state_updated = False
+    if completed and not failures and not dry_run:
+        state["lastSuccessfulItemSyncAt"] = date_to_iso
+        state.pop("pendingIncremental", None)
+        save_state(state_path, state)
+        state_updated = True
 
     return {
+        **collection_outcome(failed=bool(failures), pause_reason=pause_reason),
         "pageCount": pages,
         "collectedProductCount": len(products),
         "successCount": len(products),
         "historyCount": len(histories),
         "failureCount": len(failures),
         "rateLimitFailureCount": rate_limit_failures,
-        "stateUpdated": 1 if completed and not failures and not dry_run else 0,
+        "stateUpdated": int(state_updated),
     }
 
 
@@ -160,10 +171,8 @@ def fetch_item_histories(client: Any, config: OwnerclanConfig, date_from: int, d
         data = client.graphql(item_histories_query(first=config.incremental.page_size, after=after, date_from=date_from, date_to=date_to))
         items, page_info = extract_connection_items(data, "itemHistories")
         histories.extend(items)
-        next_cursor = page_info.get("endCursor")
-        if not page_info.get("hasNextPage") or not next_cursor:
-            break
-        if str(next_cursor) in seen_cursors or next_cursor == after:
+        next_cursor = next_page_cursor(page_info, after, seen_cursors)
+        if next_cursor is None:
             break
         seen_cursors.add(str(next_cursor))
         after = str(next_cursor)
@@ -180,7 +189,7 @@ def _incremental_from(last_success: Any, config: OwnerclanConfig) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Sync Ownerclan products changed by updatedAt range.")
+    parser = argparse.ArgumentParser(description="Persist Ownerclan itemHistories pages.")
     parser.add_argument("--config", default=None)
     parser.add_argument("--page-limit", type=int, default=None, help="Limit pages for a small real API test run.")
     parser.add_argument("--item-limit", type=int, default=None, help="Limit changed items for a small real API test run.")

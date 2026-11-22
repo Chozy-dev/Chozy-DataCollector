@@ -9,7 +9,9 @@ from pathlib import Path
 from threading import Event, Lock
 from typing import Any
 
-from product_data_collector.persistence.postgres_storage import ProductSnapshotSaver, save_products_with_raw_samples_if_enabled
+from product_data_collector.persistence.postgres_storage import ProductSnapshotSaver, require_product_save
+
+from product_data_collector.common.collection_state import collection_outcome, next_page_cursor, validate_limits
 
 from ..services.categories import load_or_refresh_leaf_categories
 from ..api.client import OwnerclanGraphQLError, OwnerclanHttpError
@@ -38,10 +40,9 @@ def collect_by_categories(
     dry_run: bool = False,
     client: Any | None = None,
 ) -> dict[str, int]:
+    validate_limits(category_limit=category_limit, page_limit=page_limit, item_limit=item_limit)
     client = client or make_client(project_root, config)
     categories = load_or_refresh_leaf_categories(project_root, config, refresh=refresh_categories, client=client)
-    if category_limit is not None:
-        categories = categories[:category_limit]
 
     collected_at = now_iso(config.timezone)
     state_path = config.output.state_dir / "category-collection-state.json"
@@ -54,8 +55,14 @@ def collect_by_categories(
     rate_limit_failures = 0
     category_pages = 0
     collected_product_count = 0
+    pause_reason = None
 
     start_index = _category_start_index(categories, resume_category_key)
+    if resume_category_key not in {str(category.get("key") or "") for category in categories}:
+        resume_category_key = None
+        resume_after = None
+    if not dry_run and categories:
+        save_state(state_path, {"runCollectedAt": collected_at, "categoryKey": str(categories[start_index].get("key") or ""), "after": resume_after})
     saver = ProductSnapshotSaver(
         project_root=project_root,
         platform="ownerclan",
@@ -89,6 +96,7 @@ def collect_by_categories(
                                 )
                             )
                         items, page_info = extract_connection_items(data, "allItems")
+                        next_cursor = next_page_cursor(page_info, after, seen_cursors)
                         category_pages += 1
                     except Exception as exc:
                         if pending_save is not None:
@@ -104,6 +112,7 @@ def collect_by_categories(
                         failures.append({"categoryKey": category_key, "error": str(exc)})
                         LOGGER.error("failed ownerclan category collection category=%s error=%s", category_key, exc)
                         return {
+                            **collection_outcome(failed=True),
                             "categoryCount": len(categories),
                             "pageCount": category_pages,
                             "collectedProductCount": collected_product_count,
@@ -118,48 +127,37 @@ def collect_by_categories(
                         pending_save = None
 
                     page_products_by_key: dict[str, dict[str, Any]] = {}
+                    consumed_count = 0
                     for item in items:
+                        consumed_count += 1
                         product_key = str(item.get("key") or "")
                         if not product_key:
-                            continue
+                            raise ValueError("Ownerclan item missing key")
                         product = normalize_item(item, collected_at)
                         page_products_by_key[product_key] = product
                         if item_limit is not None and collected_product_count + len(page_products_by_key) >= item_limit:
                             break
 
-                    next_cursor = page_info.get("endCursor")
-                    should_stop = False
-                    state_after_save: dict[str, Any] | None = None
-
-                    if item_limit is not None and collected_product_count + len(page_products_by_key) >= item_limit:
-                        state_after_save = {"runCollectedAt": collected_at, "categoryKey": category_key, "after": after}
-                        should_stop = True
-                    elif not page_info.get("hasNextPage") or not next_cursor:
-                        next_category = _next_category_key(categories, category_index)
-                        if next_category:
-                            state_after_save = {
-                                "runCollectedAt": collected_at,
-                                "categoryKey": next_category,
-                                "after": None,
-                            }
-                        should_stop = True
-                    elif page_limit is not None and category_pages >= page_limit:
-                        state_after_save = {
-                            "runCollectedAt": collected_at,
-                            "categoryKey": category_key,
-                            "after": str(next_cursor),
-                        }
-                        should_stop = True
-                    elif str(next_cursor) in seen_cursors or next_cursor == after:
-                        LOGGER.warning("stopping ownerclan item pagination due to repeated cursor category=%s cursor=%s", category_key, next_cursor)
-                        state_after_save = {"runCollectedAt": collected_at, "categoryKey": category_key, "after": after}
-                        should_stop = True
-                    else:
-                        state_after_save = {
-                            "runCollectedAt": collected_at,
-                            "categoryKey": category_key,
-                            "after": str(next_cursor),
-                        }
+                    # When a product cap cuts a page, resume at its last saved edge.
+                    truncated = consumed_count < len(items)
+                    if truncated:
+                        next_cursor = str(items[consumed_count - 1].get("_cursor") or "")
+                        if not next_cursor or next_cursor == after:
+                            raise ValueError("Cannot resume a partially consumed page without an edge cursor")
+                    next_category = _next_category_key(categories, category_index)
+                    state_after_save = {
+                        "runCollectedAt": collected_at,
+                        "categoryKey": category_key if next_cursor else next_category,
+                        "after": next_cursor,
+                    } if next_cursor or next_category else None
+                    remaining = bool(next_cursor or next_category)
+                    if remaining and item_limit is not None and collected_product_count + len(page_products_by_key) >= item_limit:
+                        pause_reason = "item_limit_reached"
+                    elif remaining and page_limit is not None and category_pages >= page_limit:
+                        pause_reason = "page_limit_reached"
+                    elif not next_cursor and next_category and category_limit is not None and category_index - start_index + 1 >= category_limit:
+                        pause_reason = "category_limit_reached"
+                    should_stop = not next_cursor or pause_reason is not None
 
                     if not dry_run:
                         pending_save = save_executor.submit(
@@ -183,9 +181,7 @@ def collect_by_categories(
 
                 resume_category_key = None
                 resume_after = None
-                if item_limit is not None and collected_product_count >= item_limit:
-                    break
-                if page_limit is not None and category_pages >= page_limit:
+                if pause_reason:
                     break
 
             if pending_save is not None:
@@ -193,10 +189,11 @@ def collect_by_categories(
     finally:
         saver.close()
 
-    if not dry_run and not failures and item_limit is None and page_limit is None:
+    if not dry_run and not failures and not pause_reason:
         clear_state(state_path)
 
     return {
+        **collection_outcome(failed=bool(failures), pause_reason=pause_reason),
         "categoryCount": len(categories),
         "pageCount": category_pages,
         "collectedProductCount": collected_product_count,
@@ -282,12 +279,24 @@ def collect_by_categories_parallel(
         if dry_run:
             return
         with progress_lock:
+            previous_completed = completed.copy()
+            previous_in_progress = dict(in_progress)
             if completed_category:
                 completed.add(category_key)
                 in_progress.pop(category_key, None)
             else:
                 in_progress[category_key] = {"after": after}
-            save_progress()
+            try:
+                save_progress()
+            except Exception:
+                completed.clear()
+                completed.update(previous_completed)
+                in_progress.clear()
+                in_progress.update(previous_in_progress)
+                raise
+
+    if not dry_run:
+        save_progress()
 
     def worker(worker_index: int) -> None:
         worker_client = make_client(project_root, config, rate_limiter=shared_rate_limiter)
@@ -368,6 +377,7 @@ def collect_by_categories_parallel(
         clear_state(state_path)
 
     return {
+        **collection_outcome(failed=bool(counters["failureCount"])),
         "categoryCount": len(categories),
         "pageCount": counters["pageCount"],
         "collectedProductCount": counters["collectedProductCount"],
@@ -411,6 +421,7 @@ def _collect_parallel_category(
                 )
             )
         items, page_info = extract_connection_items(data, "allItems")
+        next_cursor = next_page_cursor(page_info, after, seen_cursors)
         page_count += 1
 
         pending_save = pending_save_ref[0]
@@ -422,11 +433,10 @@ def _collect_parallel_category(
         for item in items:
             product_key = str(item.get("key") or "")
             if not product_key:
-                continue
+                raise ValueError("Ownerclan item missing key")
             page_products_by_key[product_key] = normalize_item(item, collected_at)
 
-        next_cursor = page_info.get("endCursor")
-        completed_category = not page_info.get("hasNextPage") or not next_cursor
+        completed_category = next_cursor is None
         state_after = None if completed_category else str(next_cursor)
         if not dry_run:
             pending_save_ref[0] = save_executor.submit(
@@ -442,13 +452,6 @@ def _collect_parallel_category(
         item_count += len(page_products_by_key)
 
         if completed_category:
-            pending_save = pending_save_ref[0]
-            if pending_save is not None:
-                pending_save.result()
-                pending_save_ref[0] = None
-            break
-        if str(next_cursor) in seen_cursors or next_cursor == after:
-            LOGGER.warning("stopping ownerclan item pagination due to repeated cursor category=%s cursor=%s", category_key, next_cursor)
             pending_save = pending_save_ref[0]
             if pending_save is not None:
                 pending_save.result()
@@ -500,10 +503,11 @@ def _save_ownerclan_category_page(
     products: dict[str, dict[str, Any]],
     saver: ProductSnapshotSaver,
 ) -> None:
-    saver.save(
+    result = saver.save(
         collected_at=collected_at,
         products=products.values(),
     )
+    require_product_save(result, products.values())
 
 
 def _category_start_index(categories: list[dict[str, Any]], category_key: str | None) -> int:
@@ -575,7 +579,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
         )
     print(result)
-    return 1 if result["failureCount"] and not result["successCount"] else 0
+    return 1 if result["failureCount"] else 0
 
 
 if __name__ == "__main__":

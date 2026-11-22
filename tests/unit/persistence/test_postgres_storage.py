@@ -1,0 +1,903 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from product_data_collector.persistence import postgres_storage
+from product_data_collector.persistence.postgres_storage import (
+    _bulk_upsert_discovery_targets,
+    _bulk_upsert_products,
+    _bulk_upsert_search_ranks,
+    _count_new_discovery_targets,
+    _discovery_target_rows,
+    _history_insert_plans,
+    _history_state,
+    _has_inventory_snapshot,
+    _has_shipping_snapshot,
+    _product_batch_size,
+    _search_rank_rows,
+    _snapshot_row,
+    init_schema,
+    load_postgres_config,
+    save_product_snapshots_if_enabled,
+)
+
+
+def test_load_postgres_config_reads_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "\n".join(
+            (
+                "POSTGRES_HOST=localhost",
+                "POSTGRES_PORT=5433",
+                "POSTGRES_DB=collector_test",
+                "POSTGRES_USER=collector",
+                "POSTGRES_PASSWORD=secret",
+            )
+        ),
+        encoding="utf-8",
+    )
+    for key in ("POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD"):
+        monkeypatch.delenv(key, raising=False)
+
+    config = load_postgres_config(tmp_path)
+
+    assert config.host == "localhost"
+    assert config.port == 5433
+    assert config.database == "collector_test"
+    assert config.user == "collector"
+    assert config.password == "secret"
+
+
+def test_discovery_target_rows_dedupe_and_preserve_metadata() -> None:
+    rows = _discovery_target_rows(
+        "domeggook",
+        [
+            {
+                "productId": "100",
+                "collectedAt": "2026-08-30T10:00:00Z",
+                "keyword": "bag",
+                "categoryCode": "01",
+                "categoryName": "bags",
+                "market": "dome",
+                "reason": "recent",
+            },
+            {
+                "productId": "100",
+                "collectedAt": "2026-08-30T10:00:00Z",
+                "keyword": "bag",
+            },
+            {"productId": "", "collectedAt": "2026-08-30T10:00:00Z"},
+        ],
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["platform"] == "domeggook"
+    assert rows[0]["external_product_id"] == "100"
+    assert rows[0]["keyword"] == "bag"
+    assert rows[0]["category_code"] == "01"
+    assert rows[0]["market"] == "dome"
+
+
+def test_snapshot_row_normalizes_product_for_postgres() -> None:
+    row = _snapshot_row(
+        "coupang",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "123",
+            "productName": "Sample",
+            "imageUrl": "https://img.example/a.jpg?size=100",
+            "backupImageUrl": "https://img.example/b.jpg?size=100",
+            "productPrice": 12000,
+            "sourceSpecific": {"openmarketSellable": True},
+            "raw": {"ignored": True},
+        },
+    )
+
+    assert row is not None
+    assert row["platform"] == "coupang"
+    assert row["external_product_id"] == "123"
+    assert row["image_url"] == "https://img.example/a.jpg"
+    assert row["backup_image_url"] == "https://img.example/b.jpg"
+    assert "current_payload" not in row
+    assert "comparable_payload" not in row
+    assert "comparable_fingerprint" not in row
+    assert row["primary_price"] == 12000
+    assert row["source_specific"] == {"openmarketSellable": True}
+
+
+def test_bulk_upsert_products_writes_source_specific_jsonb() -> None:
+    row = _snapshot_row(
+        "ownerclan",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "W9",
+            "productName": "Sample",
+            "productUrl": "https://www.ownerclan.com/V2/product/view.php?selfcode=W9",
+            "sourceSpecific": {"openmarketSellable": False, "vendorKey": "V1"},
+        },
+    )
+    assert row is not None
+    connection = _BulkConnection()
+
+    _bulk_upsert_products(connection, [row], {})
+
+    call = connection.executemany_calls[0]
+    assert "source_specific" in call["statement"]
+    assert call["params"][0][6].obj == {"openmarketSellable": False, "vendorKey": "V1"}
+
+
+def test_snapshot_row_preserves_falsy_inventory_and_shipping_values() -> None:
+    row = _snapshot_row(
+        "ownerclan",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "zero-stock",
+            "productPrice": "12345",
+            "inventory": {"stockQuantity": 0},
+            "shipping": {"isFreeShipping": False},
+        },
+    )
+
+    assert row is not None
+    assert row["stock_quantity"] == 0
+    assert row["is_free_shipping"] is False
+
+
+def test_empty_inventory_snapshot_is_skipped_for_coupang_search_records() -> None:
+    row = _snapshot_row(
+        "coupang",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "123",
+            "productName": "Sample",
+            "productPrice": 12000,
+        },
+    )
+
+    assert row is not None
+    assert row["stock_quantity"] is None
+    assert not _has_inventory_snapshot(row)
+
+
+def test_inventory_snapshot_keeps_zero_and_source_inventory_values() -> None:
+    zero_row = _snapshot_row(
+        "ownerclan",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "zero-stock",
+            "inventory": {"stockQuantity": 0},
+        },
+    )
+    api_quantity_row = _snapshot_row(
+        "ownerclan",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "api-stock",
+            "inventory": {
+                "stockQuantity": None,
+                "stockQuantitySource": "sum(options[].quantity)",
+                "apiStockQuantity": 10,
+            },
+        },
+    )
+
+    assert zero_row is not None
+    assert api_quantity_row is not None
+    assert _has_inventory_snapshot(zero_row)
+    assert _has_inventory_snapshot(api_quantity_row)
+
+
+def test_empty_ownerclan_inventory_snapshot_is_skipped_when_only_source_label_exists() -> None:
+    row = _snapshot_row(
+        "ownerclan",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "missing-stock",
+            "inventory": {
+                "stockQuantity": None,
+                "stockQuantitySource": "sum(options[].quantity)",
+                "apiStockQuantity": None,
+            },
+        },
+    )
+
+    assert row is not None
+    assert not _has_inventory_snapshot(row)
+
+
+def test_empty_domeggook_inventory_snapshot_is_skipped() -> None:
+    row = _snapshot_row(
+        "domeggook",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "missing-stock",
+            "inventory": {
+                "stockQuantity": None,
+                "domeMoq": None,
+                "domeMaxOrderQuantity": None,
+                "domeOrderUnit": None,
+                "supplyOrderUnit": None,
+            },
+        },
+    )
+
+    assert row is not None
+    assert not _has_inventory_snapshot(row)
+
+
+def test_shipping_snapshot_keeps_coupang_free_shipping_flag() -> None:
+    row = _snapshot_row(
+        "coupang",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "123",
+            "productPrice": 12000,
+            "isFreeShipping": False,
+        },
+    )
+
+    assert row is not None
+    assert row["is_free_shipping"] is False
+    assert _has_shipping_snapshot(row["shipping_rows"][0], row)
+
+
+def test_empty_shipping_snapshot_is_skipped_when_source_has_no_values() -> None:
+    row = _snapshot_row(
+        "ownerclan",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "missing-shipping",
+            "shipping": {
+                "fee": None,
+                "feeRaw": None,
+                "type": None,
+                "typeRaw": None,
+                "isFreeShipping": None,
+                "sourceFields": {"shippingFee": None, "shippingType": None},
+            },
+        },
+    )
+
+    assert row is not None
+    assert not _has_shipping_snapshot(row["shipping_rows"][0], row)
+
+
+def test_snapshot_row_splits_domeggook_market_prices_and_shipping() -> None:
+    row = _snapshot_row(
+        "domeggook",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "11291544",
+            "prices": {
+                "domeCurrentSupplyPrice": "10+650|100+620",
+                "supplyCurrentSupplyPrice": 680,
+                "minimumRetailPrice": 900,
+                "recommendedRetailPrice": 1000,
+                "resaleMinimumPrice": 1200,
+            },
+            "shipping": {
+                "feePayer": "P",
+                "domeFeePayer": "P",
+                "domeFee": "100+3000|100+3000",
+                "domeFeeType": "수량별비례",
+                "domeFeeTable": "100+3000|100+3000",
+                "supplyFeePayer": "B",
+                "supplyFee": 3000,
+                "supplyFeeType": "고정배송비",
+                "feeExtraJeju": 3000,
+                "feeExtraIslands": 5000,
+            },
+        },
+    )
+
+    assert row is not None
+    assert row["primary_price"] is None
+    assert row["prices_payload"]["domeCurrentSupplyPrice"] == "10+650|100+620"
+    assert row["price_rows"] == [
+        {"market": "dome", "price_type": "current_supply", "amount": None},
+        {"market": "supply", "price_type": "current_supply", "amount": 680},
+        {"market": "retail", "price_type": "minimum_retail", "amount": 900},
+        {"market": "retail", "price_type": "recommended_retail", "amount": 1000},
+        {"market": "resale", "price_type": "minimum", "amount": 1200},
+    ]
+    assert row["shipping_fee"] is None
+    assert row["shipping_rows"][0]["market"] == "dome"
+    assert row["shipping_rows"][0]["fee"] is None
+    assert row["shipping_rows"][0]["shipping_type"] == "quantity_proportional"
+    assert row["shipping_rows"][0]["shipping_fee_raw"] == "100+3000|100+3000"
+    assert row["shipping_rows"][0]["shipping_fee_type_raw"] == "수량별비례"
+    assert row["shipping_rows"][0]["additional_fee"] == 3000
+    assert row["shipping_rows"][0]["requires_quantity_calculation"] is True
+    assert row["shipping_rows"][0]["shipping_payment"] == "prepaid"
+    assert row["shipping_rows"][0]["payload"]["domeFee"] == "100+3000|100+3000"
+    assert row["shipping_rows"][0]["payload"]["shipping_fee"] is None
+    assert row["shipping_rows"][0]["payload"]["remote_area_fee"] == {"jeju": 3000, "islands": 5000}
+    assert row["shipping_rows"][0]["payload"]["source_fields"] == {
+        "fee": "100+3000|100+3000",
+        "type": "수량별비례",
+        "tbl": "100+3000|100+3000",
+        "pay": "P",
+    }
+    assert row["shipping_rows"][1]["market"] == "supply"
+    assert row["shipping_rows"][1]["fee"] == 3000
+    assert row["shipping_rows"][1]["shipping_type"] == "fixed"
+    assert row["shipping_rows"][1]["shipping_payment"] == "collect"
+    assert row["shipping_rows"][1]["shipping_fee_raw"] == 3000
+    assert row["shipping_rows"][1]["shipping_fee_type_raw"] == "고정배송비"
+
+
+def test_snapshot_row_stores_domeggook_options_in_inventory_state() -> None:
+    row = _snapshot_row(
+        "domeggook",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "option-product",
+            "inventory": {"stockQuantity": 10},
+            "options": [
+                {
+                    "skuKey": "00",
+                    "skuType": "combination",
+                    "optionAttributes": [{"name": "색상", "value": "검정"}],
+                    "quantity": 10,
+                    "domePrice": 0,
+                }
+            ],
+        },
+    )
+
+    assert row is not None
+    state = _history_state(row)
+    assert state["inventory"]["options"] == [
+        {
+            "skuKey": "00",
+            "skuType": "combination",
+            "optionAttributes": [{"name": "색상", "value": "검정"}],
+            "quantity": 10,
+            "domePrice": 0,
+        }
+    ]
+
+
+def test_snapshot_row_keeps_zero_shipping_distinct_from_missing_fee() -> None:
+    free_row = _snapshot_row(
+        "ownerclan",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "free",
+            "prices": {"currentSupplyPrice": 1000},
+            "shipping": {"fee": 0, "type": "free"},
+        },
+    )
+    missing_row = _snapshot_row(
+        "ownerclan",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "missing",
+            "prices": {"currentSupplyPrice": 1000},
+            "shipping": {"fee": None, "type": "unknown"},
+        },
+    )
+
+    assert free_row is not None
+    assert missing_row is not None
+    assert free_row["shipping_rows"][0]["fee"] == 0
+    assert missing_row["shipping_rows"][0]["fee"] is None
+
+
+def test_snapshot_row_casts_won_text_prices_for_storage() -> None:
+    row = _snapshot_row(
+        "ownerclan",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "won-price",
+            "prices": {"currentSupplyPrice": " 12,300원 "},
+            "inventory": {"stockQuantity": " 4 "},
+            "shipping": {"fee": "3,000원", "type": "고정배송비"},
+        },
+    )
+
+    assert row is not None
+    assert row["primary_price"] == 12300
+    assert row["price_rows"][0]["amount"] == 12300
+    assert row["stock_quantity"] == 4
+    assert row["shipping_rows"][0]["fee"] == 3000
+
+
+def test_snapshot_row_parses_shipping_payment_separately_from_fee() -> None:
+    row = _snapshot_row(
+        "domeggook",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "collect",
+            "shipping": {
+                "feePayer": "B",
+                "domeFee": "1+3500|20+5500",
+                "domeFeeType": "수량별차등",
+            },
+        },
+    )
+
+    assert row is not None
+    shipping = row["shipping_rows"][0]
+    assert shipping["fee"] is None
+    assert shipping["shipping_type"] == "quantity_tiered"
+    assert shipping["shipping_payment"] == "collect"
+    assert shipping["payload"]["shipping_payment"] == "collect"
+    assert shipping["payload"]["shipping_fee_raw"] == "1+3500|20+5500"
+    assert shipping["shipping_rules"] == [
+        {"min_quantity": 1, "fee": 3500},
+        {"min_quantity": 20, "fee": 5500},
+    ]
+
+
+def test_snapshot_row_preserves_ownerclan_shipping_without_domeggook_fallback() -> None:
+    row = _snapshot_row(
+        "ownerclan",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "owner-shipping",
+            "prices": {"currentSupplyPrice": 1000},
+            "shipping": {
+                "fee": 3000,
+                "feeRaw": "3,000",
+                "type": "inAdvance",
+                "typeRaw": "inAdvance",
+                "isFreeShipping": False,
+                "sourceFields": {"shippingFee": "3,000", "shippingType": "inAdvance"},
+            },
+        },
+    )
+
+    assert row is not None
+    assert row["is_free_shipping"] is False
+    assert row["shipping_rows"] == [
+        {
+            "market": "ownerclan",
+            "fee": 3000,
+            "shipping_type": "unknown",
+            "shipping_payment": "prepaid",
+            "shipping_fee": 3000,
+            "shipping_fee_raw": "3,000",
+            "shipping_fee_type_raw": "inAdvance",
+            "requires_quantity_calculation": False,
+            "payload": row["shipping_rows"][0]["payload"],
+        }
+    ]
+    assert row["shipping_rows"][0]["payload"]["source_fields"] == {"shippingFee": "3,000", "shippingType": "inAdvance"}
+
+
+def test_snapshot_row_does_not_create_supply_shipping_from_dome_fallback() -> None:
+    row = _snapshot_row(
+        "domeggook",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "dome-only",
+            "shipping": {
+                "feePayer": "P",
+                "domeFee": 3000,
+                "domeFeeType": "고정배송비",
+            },
+        },
+    )
+
+    assert row is not None
+    assert [shipping["market"] for shipping in row["shipping_rows"]] == ["dome"]
+    assert row["shipping_rows"][0]["payload"]["source_fields"]["pay"] == "P"
+
+
+def test_history_state_stores_full_core_state_after_price_change() -> None:
+    previous = _snapshot_row(
+        "ownerclan",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "price-change",
+            "prices": {"currentSupplyPrice": 1000},
+            "inventory": {"stockQuantity": 5},
+            "shipping": {"fee": 3000, "feeRaw": "3,000", "type": "fixed"},
+            "status": "available",
+        },
+    )
+    current = _snapshot_row(
+        "ownerclan",
+        "2026-08-31T10:00:00Z",
+        {
+            "productId": "price-change",
+            "prices": {"currentSupplyPrice": 1200},
+            "inventory": {"stockQuantity": 5},
+            "shipping": {"fee": 3000, "feeRaw": "3,000", "type": "fixed"},
+            "status": "available",
+        },
+    )
+
+    assert previous is not None
+    assert current is not None
+    plans = _history_insert_plans(
+        [current],
+        {
+            "price-change": {
+                "prices": _history_state(previous)["prices"],
+                "inventory": _history_state(previous)["inventory"],
+                "shipping": _history_state(previous)["shipping"],
+                "status": "available",
+            }
+        },
+    )
+
+    assert len(plans) == 1
+    assert plans[0]["change_type"] == "update"
+    assert "prices.rows" in plans[0]["changed_fields"]
+    assert plans[0]["prices"]["rows"][0]["amount"] == 1200
+    assert plans[0]["inventory"]["stockQuantity"] == 5
+    assert plans[0]["shipping"]["rows"][0]["fee"] == 3000
+
+
+def test_history_plan_skips_basic_info_only_change() -> None:
+    previous = _snapshot_row(
+        "ownerclan",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "display-change",
+            "productName": "old",
+            "prices": {"currentSupplyPrice": 1000},
+            "inventory": {"stockQuantity": 5},
+            "shipping": {"fee": 3000},
+        },
+    )
+    current = _snapshot_row(
+        "ownerclan",
+        "2026-08-31T10:00:00Z",
+        {
+            "productId": "display-change",
+            "productName": "new",
+            "imageUrl": "https://cdn.example/new.jpg",
+            "prices": {"currentSupplyPrice": "1000"},
+            "inventory": {"stockQuantity": "5"},
+            "shipping": {"fee": "3000"},
+        },
+    )
+
+    assert previous is not None
+    assert current is not None
+    plans = _history_insert_plans(
+        [current],
+        {
+            "display-change": {
+                "prices": _history_state(previous)["prices"],
+                "inventory": _history_state(previous)["inventory"],
+                "shipping": _history_state(previous)["shipping"],
+                "status": previous["status"],
+            }
+        },
+    )
+
+    assert plans == []
+
+
+def test_history_plan_creates_initial_row_for_new_product() -> None:
+    row = _snapshot_row(
+        "coupang",
+        "2026-08-30T10:00:00Z",
+        {
+            "productId": "new-product",
+            "productName": "Sample",
+            "productPrice": 12000,
+            "isFreeShipping": True,
+        },
+    )
+
+    assert row is not None
+    plans = _history_insert_plans([row], {})
+
+    assert len(plans) == 1
+    assert plans[0]["change_type"] == "initial"
+    assert plans[0]["prices"]["rows"][0]["price_type"] == "primary"
+    assert plans[0]["shipping"]["rows"][0]["isFreeShipping"] is True
+
+
+def test_product_batch_size_uses_env_with_default_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("POSTGRES_PRODUCT_BATCH_SIZE", raising=False)
+    assert _product_batch_size(tmp_path) == 1000
+
+    monkeypatch.setenv("POSTGRES_PRODUCT_BATCH_SIZE", "250")
+    assert _product_batch_size(tmp_path) == 250
+
+    monkeypatch.setenv("POSTGRES_PRODUCT_BATCH_SIZE", "0")
+    assert _product_batch_size(tmp_path) == 1000
+
+
+def test_init_schema_preserves_legacy_objects(monkeypatch) -> None:
+    from product_data_collector.persistence import schema
+    monkeypatch.setattr(schema, "validate_schema", lambda connection: None)
+    connection = _SchemaConnection()
+    init_schema(connection)
+    statements = "\n".join(connection.statements).upper()
+    for forbidden in ("DROP ", "TRUNCATE ", "DELETE FROM", "UPDATE ", "ALTER TABLE"):
+        assert forbidden not in statements
+    assert "CREATE TABLE IF NOT EXISTS PRODUCTS" in statements
+    assert connection.committed
+
+
+def test_existing_schema_startup_only_validates_without_ddl(monkeypatch):
+    from product_data_collector.persistence import schema, product_storage_schema
+    checked = []
+    monkeypatch.setattr(schema, 'validate_schema', lambda c: checked.append('base'))
+    monkeypatch.setattr(product_storage_schema, 'validate_product_storage',
+                        lambda c, **kwargs: checked.append(kwargs))
+    class Existing(_SchemaConnection):
+        def execute(self, statement, params=None):
+            self.statements.append(statement)
+            class Result:
+                def fetchone(self):
+                    return {'existing':'products'}
+            return Result()
+    c = Existing()
+    init_schema(c)
+    assert checked == ['base', {'indexes':True}]
+    assert not any('CREATE ' in q or 'ALTER ' in q for q in c.statements)
+    assert c.committed
+
+
+def test_save_product_snapshots_if_enabled_skips_when_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("POSTGRES_ENABLED", "false")
+
+    saved_count = save_product_snapshots_if_enabled(
+        project_root=tmp_path,
+        platform="ownerclan",
+        collected_at="2026-08-30T10:00:00Z",
+        products=[{"productId": "123"}],
+    )
+
+    assert saved_count == 0
+
+
+def test_search_rank_rows_keep_only_domeggook_ranked_sorts_and_positive_ranks() -> None:
+    rows = _search_rank_rows(
+        "domeggook",
+        [
+            {"collectedAt": "2026-08-30T10:00:00Z", "productId": "ha-1", "sort": "ha", "rank": 1},
+            {"collectedAt": "2026-08-30T10:00:00Z", "productId": "rd-1", "sort": "rd", "rank": 2},
+            {"collectedAt": "2026-08-30T10:00:00Z", "productId": "da-1", "sort": "da", "rank": 3},
+            {"collectedAt": "2026-08-30T10:00:00Z", "productId": "aa-1", "sort": "aa", "rank": 4},
+            {"collectedAt": "2026-08-30T10:00:00Z", "productId": "missing-rank", "sort": "ha"},
+            {"collectedAt": "2026-08-30T10:00:00Z", "productId": "zero-rank", "sort": "ha", "rank": 0},
+        ],
+    )
+
+    assert [(row["external_product_id"], row["sort"], row["rank"]) for row in rows] == [
+        ("ha-1", "ha", 1),
+        ("rd-1", "rd", 2),
+    ]
+
+
+def test_search_rank_rows_preserve_same_product_for_different_keywords() -> None:
+    rows = _search_rank_rows(
+        "domeggook",
+        [
+            {
+                "collectedAt": "2026-08-30T10:00:00Z",
+                "productId": "100",
+                "keyword": "bag",
+                "categoryCode": "01_01_00_00_00",
+                "market": "dome",
+                "sort": "ha",
+                "rank": 1,
+            },
+            {
+                "collectedAt": "2026-08-30T10:00:00Z",
+                "productId": "100",
+                "keyword": "case",
+                "categoryCode": "02_01_00_00_00",
+                "market": "dome",
+                "sort": "ha",
+                "rank": 1,
+            },
+        ],
+    )
+
+    assert len(rows) == 2
+    assert {row["keyword"] for row in rows} == {"bag", "case"}
+
+
+def test_discovery_target_count_uses_existing_ids() -> None:
+    rows = _discovery_target_rows(
+        "domeggook",
+        [
+            {"collectedAt": "2026-08-30T10:00:00Z", "productId": "100"},
+            {"collectedAt": "2026-08-30T10:00:00Z", "productId": "200"},
+        ],
+    )
+    connection = _BulkConnection(existing_ids={"100"})
+
+    assert _count_new_discovery_targets(connection, "domeggook", rows) == 1
+
+
+def test_discovery_and_rank_rows_are_bulk_upserted() -> None:
+    discovery_rows = _discovery_target_rows(
+        "domeggook",
+        [
+            {"collectedAt": "2026-08-30T10:00:00Z", "productId": "100"},
+            {"collectedAt": "2026-08-30T10:00:00Z", "productId": "200"},
+        ],
+    )
+    rank_rows = _search_rank_rows(
+        "domeggook",
+        [
+            {"collectedAt": "2026-08-30T10:00:00Z", "productId": "100", "sort": "ha", "rank": 1},
+            {"collectedAt": "2026-08-30T10:00:00Z", "productId": "200", "sort": "ha", "rank": 2},
+        ],
+    )
+    connection = _BulkConnection()
+
+    _bulk_upsert_discovery_targets(connection, discovery_rows)
+    _bulk_upsert_search_ranks(connection, rank_rows)
+
+    assert len(connection.executemany_calls) == 2
+    assert all("ON CONFLICT" in call["statement"] for call in connection.executemany_calls)
+    assert [len(call["params"]) for call in connection.executemany_calls] == [2, 2]
+    assert all("payload" not in call["statement"].lower() for call in connection.executemany_calls)
+
+
+def test_save_products_with_raw_samples_prunes_to_platform_retention(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(postgres_storage, "_save_product_batch_with_retry", lambda connection, batch: len(batch))
+    products = [
+        {"productId": f"raw-{index}", "collectedAt": "2026-08-30T10:00:00Z", "raw": {"index": index}}
+        for index in range(105)
+    ]
+    connection = _BulkConnection()
+
+    result = postgres_storage._save_products_with_raw_samples(
+        connection=connection,
+        batch_size=100,
+        platform="ownerclan",
+        collected_at="2026-08-30T10:00:00Z",
+        products=products,
+        raw_sample_limit=20,
+    )
+
+    assert result["rawSampleCount"] == 20
+    assert len(connection.executemany_calls[0]["params"]) == 20
+    assert any("DELETE FROM product_raw_samples" in call["statement"] for call in connection.execute_calls)
+    assert ("ownerclan", "ownerclan", 100) in [call["params"] for call in connection.execute_calls]
+
+
+def test_save_products_with_zero_raw_sample_limit_preserves_existing_samples(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(postgres_storage, "_save_product_batch_with_retry", lambda connection, batch: len(batch))
+    connection = _BulkConnection()
+
+    result = postgres_storage._save_products_with_raw_samples(
+        connection=connection,
+        batch_size=100,
+        platform="ownerclan",
+        collected_at="2026-08-30T10:00:00Z",
+        products=[{"productId": "raw-1", "collectedAt": "2026-08-30T10:00:00Z", "raw": {"index": 1}}],
+        raw_sample_limit=0,
+    )
+
+    assert result["rawSampleCount"] == 0
+    assert connection.executemany_calls == []
+    assert connection.execute_calls == []
+
+
+def test_failed_commit_is_never_counted_as_confirmed(monkeypatch):
+    connection = _BulkConnection()
+    monkeypatch.setattr(postgres_storage, "_save_product_batch", lambda *args: 1)
+    def fail_commit():
+        raise RuntimeError("commit failed")
+    monkeypatch.setattr(connection, "commit", fail_commit)
+    with pytest.raises(postgres_storage.ProductSaveError) as error:
+        postgres_storage._save_product_batches(connection, [_snapshot_row("ownerclan", "2026-01-01T00:00:00Z", {"productId": "A"})], 100)
+    assert error.value.committed_ids == ()
+    assert error.value.pending_ids == ("A",)
+    assert connection.rollbacks == 2
+
+
+def test_migration_plan_does_not_connect(monkeypatch, capsys):
+    from product_data_collector.persistence import migrations
+    def unexpected_connection(*args):
+        raise AssertionError("plan must not connect")
+    monkeypatch.setattr(postgres_storage, "connect", unexpected_connection)
+    assert migrations.main(["--plan"]) == 0
+    output = capsys.readouterr().out
+    assert "ADD COLUMN IF NOT EXISTS" in output
+    assert "DROP" not in output
+    assert "DELETE FROM" not in output  # FK ON DELETE SET NULL/RESTRICT preserves events.
+
+
+def test_raw_sample_only_zero_budget_never_connects_or_prunes(tmp_path, monkeypatch):
+    monkeypatch.setattr(postgres_storage, "postgres_enabled", lambda _: True)
+    def unexpected_connection(*args):
+        raise AssertionError("zero insertion budget must not connect/prune")
+    monkeypatch.setattr(postgres_storage, "connect", unexpected_connection)
+    assert postgres_storage.save_product_raw_samples_if_enabled(
+        project_root=tmp_path, platform="ownerclan", collected_at="2026-01-01T00:00:00Z",
+        products=[{"productId": "A", "raw": {}}], limit=0,
+    ) == 0
+
+
+def test_snapshot_missing_product_id_is_an_error():
+    with pytest.raises(ValueError, match="product ID"):
+        _snapshot_row("ownerclan", "2026-01-01T00:00:00Z", {})
+
+
+
+class _SchemaResult:
+    def fetchone(self):
+        return None
+
+
+class _SchemaCursor:
+    def __init__(self, connection: "_SchemaConnection") -> None:
+        self.connection = connection
+
+    def __enter__(self) -> "_SchemaCursor":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def execute(self, statement: str, params=None) -> None:
+        self.connection.statements.append(statement)
+
+
+class _SchemaConnection:
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+        self.committed = False
+
+    def cursor(self) -> _SchemaCursor:
+        return _SchemaCursor(self)
+
+    def execute(self, statement: str, params=None) -> _SchemaResult:
+        self.statements.append(statement)
+        return _SchemaResult()
+
+    def commit(self) -> None:
+        self.committed = True
+
+
+class _FetchAllResult:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def fetchall(self):
+        return self.rows
+
+
+class _BulkCursor:
+    def __init__(self, connection: "_BulkConnection") -> None:
+        self.connection = connection
+
+    def __enter__(self) -> "_BulkCursor":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def executemany(self, statement: str, params) -> None:
+        self.connection.executemany_calls.append({"statement": statement, "params": list(params)})
+
+
+class _BulkConnection:
+    def __init__(self, *, existing_ids=None) -> None:
+        self.existing_ids = set(existing_ids or [])
+        self.executemany_calls = []
+        self.execute_calls = []
+        self.commits = 0
+        self.rollbacks = 0
+
+    def cursor(self) -> _BulkCursor:
+        return _BulkCursor(self)
+
+    def execute(self, statement: str, params=None) -> _FetchAllResult:
+        self.execute_calls.append({"statement": statement.strip(), "params": params})
+        return _FetchAllResult([{"external_product_id": value} for value in sorted(self.existing_ids)])
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1

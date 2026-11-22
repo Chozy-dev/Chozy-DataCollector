@@ -31,17 +31,15 @@ def parse_product_records(
     requested_keyword: str,
     collected_at: str,
 ) -> list[dict[str, Any]]:
-    data = payload.get("data") or {}
-    if not isinstance(data, dict):
-        data = {}
-    product_data = data.get("productData") or []
-    if not isinstance(product_data, list):
-        product_data = []
+    data = payload.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("productData"), list):
+        raise ValueError("Invalid Coupang search response: missing productData list")
+    product_data = data["productData"]
 
     records: list[dict[str, Any]] = []
     for index, product in enumerate(product_data, start=1):
-        if not isinstance(product, dict):
-            product = {}
+        if not isinstance(product, dict) or product.get("productId") in (None, ""):
+            raise ValueError("Invalid Coupang product: missing productId")
         product_url = product.get("productUrl")
         item_id = _query_value(product_url, "itemId")
         vendor_item_id = _query_value(product_url, "vendorItemId")

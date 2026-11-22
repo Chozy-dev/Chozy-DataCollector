@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import hashlib
 from threading import Lock
 from collections.abc import Iterable
 from contextlib import contextmanager
@@ -27,6 +28,8 @@ from product_data_collector.domain.product_history import (
     normalize_current_product,
 )
 from product_data_collector.domain.shipping_fees import parse_shipping_fee
+from product_data_collector.domain.current_state import CURRENT_COLUMNS, project_current
+from .product_storage_schema import uses_current_storage
 
 
 TRUE_VALUES = {"1", "true", "yes", "y", "on"}
@@ -36,7 +39,54 @@ PRODUCT_BATCH_SIZE_ENV = "POSTGRES_PRODUCT_BATCH_SIZE"
 MAX_RAW_SAMPLE_RETENTION = 100
 LOGGER = logging.getLogger(__name__)
 _SCHEMA_INIT_LOCK = Lock()
-_SCHEMA_INIT_KEYS: set[tuple[str, int, str, str]] = set()
+_SCHEMA_INIT_KEYS: set[tuple[str, int, str, str, bool]] = set()
+
+
+class ProductSaveError(RuntimeError):
+    """Confirmed commits and the unconfirmed suffix of a failed save call.
+
+    A commit acknowledgement may be lost. Pending IDs must be replayed, not
+    assumed absent from the DB. Previously confirmed batches remain committed.
+    """
+
+    def __init__(self, platform, committed_ids, pending_ids, *, raw_sample_count=0):
+        self.platform = platform
+        self.committed_ids = tuple(committed_ids)
+        self.pending_ids = tuple(pending_ids)
+        self.raw_sample_count = raw_sample_count
+        super().__init__(
+            f"PostgreSQL save incomplete platform={platform} committed={len(self.committed_ids)} "
+            f"pending={len(self.pending_ids)} firstPending={next(iter(self.pending_ids), '')}"
+        )
+
+
+def require_product_save(result: dict[str, int], products: Iterable[dict[str, Any]]) -> None:
+    """A disabled or incomplete DB write cannot advance a workflow checkpoint."""
+    expected = len({external_product_id(p) for p in products})
+    if result["snapshotCount"] != expected:
+        raise RuntimeError(f"Product save not confirmed: expected={expected}, result={result}")
+
+
+def require_database_enabled(project_root: Path) -> None:
+    if not postgres_enabled(project_root):
+        raise RuntimeError("PostgreSQL is disabled; a collection checkpoint cannot be advanced")
+
+
+def _save_product_batches(connection, rows, batch_size, *, raw_sample_count=0):
+    rows = _dedupe_product_rows(rows)
+    committed_ids: list[str] = []
+    for offset in range(0, len(rows), batch_size):
+        batch = rows[offset:offset + batch_size]
+        try:
+            _save_product_batch_with_retry(connection, batch)
+        except Exception as exc:
+            raise ProductSaveError(
+                batch[0]["platform"], committed_ids,
+                [row["external_product_id"] for row in rows[offset:]],
+                raw_sample_count=raw_sample_count,
+            ) from exc
+        committed_ids.extend(row["external_product_id"] for row in batch)
+    return len(committed_ids)
 
 @dataclass(frozen=True)
 class PostgresConfig:
@@ -174,169 +224,37 @@ def save_discovered_product_ids_if_enabled(
 
 
 def init_schema(connection: Connection[Any]) -> None:
-    statements = (
-        """
-        CREATE TABLE IF NOT EXISTS products (
-            id BIGSERIAL PRIMARY KEY,
-            platform TEXT NOT NULL,
-            external_product_id TEXT NOT NULL,
-            product_name TEXT NULL,
-            product_url TEXT NULL,
-            image_url TEXT NULL,
-            backup_image_url TEXT NULL,
-            source_specific JSONB NOT NULL DEFAULT '{}'::jsonb,
-            status TEXT NULL,
-            seller_external_id TEXT NULL,
-            seller_nickname TEXT NULL,
-            seller_type TEXT NULL,
-            seller_grade TEXT NULL,
-            seller_excellent_seller BOOLEAN NULL,
-            seller_average_satisfaction TEXT NULL,
-            seller_review_count NUMERIC(18, 2) NULL,
-            first_seen_at TIMESTAMPTZ NOT NULL,
-            last_collected_at TIMESTAMPTZ NOT NULL,
-            UNIQUE (platform, external_product_id)
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS schema_migrations (
-            name TEXT PRIMARY KEY,
-            applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS product_raw_samples (
-            id BIGSERIAL PRIMARY KEY,
-            platform TEXT NOT NULL,
-            external_product_id TEXT NOT NULL,
-            collected_at TIMESTAMPTZ NOT NULL,
-            payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            CONSTRAINT product_raw_samples_platform_collected_product_key UNIQUE (platform, collected_at, external_product_id)
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS product_search_ranks (
-            id BIGSERIAL PRIMARY KEY,
-            platform TEXT NOT NULL,
-            collected_at TIMESTAMPTZ NOT NULL,
-            keyword TEXT NOT NULL DEFAULT '',
-            category_code TEXT NOT NULL DEFAULT '',
-            category_name TEXT NULL,
-            category_path JSONB NOT NULL DEFAULT '[]'::jsonb,
-            market TEXT NOT NULL DEFAULT 'default',
-            sort TEXT NOT NULL DEFAULT '',
-            reason TEXT NULL,
-            external_product_id TEXT NOT NULL,
-            rank INTEGER NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            CONSTRAINT product_search_ranks_history_key
-                UNIQUE (platform, collected_at, keyword, category_code, market, sort, external_product_id, rank)
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS product_discovery_targets (
-            id BIGSERIAL PRIMARY KEY,
-            platform TEXT NOT NULL,
-            external_product_id TEXT NOT NULL,
-            active BOOLEAN NOT NULL DEFAULT true,
-            first_discovered_at TIMESTAMPTZ NOT NULL,
-            last_discovered_at TIMESTAMPTZ NOT NULL,
-            keyword TEXT NULL,
-            category_code TEXT NULL,
-            category_name TEXT NULL,
-            market TEXT NULL,
-            reason TEXT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            UNIQUE (platform, external_product_id)
-        )
-        """,
-        "ALTER TABLE products ADD COLUMN IF NOT EXISTS backup_image_url TEXT NULL",
-        "ALTER TABLE products ADD COLUMN IF NOT EXISTS source_specific JSONB NOT NULL DEFAULT '{}'::jsonb",
-        "ALTER TABLE products ADD COLUMN IF NOT EXISTS status TEXT NULL",
-        "ALTER TABLE products ADD COLUMN IF NOT EXISTS seller_external_id TEXT NULL",
-        "ALTER TABLE products ADD COLUMN IF NOT EXISTS seller_nickname TEXT NULL",
-        "ALTER TABLE products ADD COLUMN IF NOT EXISTS seller_type TEXT NULL",
-        "ALTER TABLE products ADD COLUMN IF NOT EXISTS seller_grade TEXT NULL",
-        "ALTER TABLE products ADD COLUMN IF NOT EXISTS seller_excellent_seller BOOLEAN NULL",
-        "ALTER TABLE products ADD COLUMN IF NOT EXISTS seller_average_satisfaction TEXT NULL",
-        "ALTER TABLE products ADD COLUMN IF NOT EXISTS seller_review_count NUMERIC(18, 2) NULL",
-        "ALTER TABLE products DROP COLUMN IF EXISTS current_payload",
-        "ALTER TABLE products DROP COLUMN IF EXISTS comparable_payload",
-        "ALTER TABLE products DROP COLUMN IF EXISTS comparable_fingerprint",
-        "ALTER TABLE products DROP COLUMN IF EXISTS created_at",
-        "ALTER TABLE products DROP COLUMN IF EXISTS updated_at",
-        "ALTER TABLE product_search_ranks ADD COLUMN IF NOT EXISTS keyword TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE product_search_ranks ADD COLUMN IF NOT EXISTS category_code TEXT NOT NULL DEFAULT ''",
-        "UPDATE product_search_ranks SET keyword = '' WHERE keyword IS NULL",
-        "UPDATE product_search_ranks SET category_code = '' WHERE category_code IS NULL",
-        "ALTER TABLE product_search_ranks ALTER COLUMN keyword SET DEFAULT ''",
-        "ALTER TABLE product_search_ranks ALTER COLUMN category_code SET DEFAULT ''",
-        "ALTER TABLE product_search_ranks ALTER COLUMN keyword SET NOT NULL",
-        "ALTER TABLE product_search_ranks ALTER COLUMN category_code SET NOT NULL",
-        "ALTER TABLE product_search_ranks DROP COLUMN IF EXISTS payload",
-        "ALTER TABLE product_discovery_targets DROP COLUMN IF EXISTS payload",
-        "DELETE FROM product_search_ranks WHERE rank <= 0",
-        "DELETE FROM product_search_ranks WHERE platform = 'domeggook' AND sort NOT IN ('ha', 'rd')",
-        "ALTER TABLE product_search_ranks DROP CONSTRAINT IF EXISTS product_search_ranks_platform_collected_market_sort_product_rank_key",
-        """
-        DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_constraint
-                WHERE conname = 'product_search_ranks_history_key'
-            ) THEN
-                ALTER TABLE product_search_ranks
-                ADD CONSTRAINT product_search_ranks_history_key
-                UNIQUE (platform, collected_at, keyword, category_code, market, sort, external_product_id, rank);
-            END IF;
-        END $$;
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS product_history (
-            id BIGSERIAL PRIMARY KEY,
-            product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-            observed_at TIMESTAMPTZ NOT NULL,
-            change_type TEXT NOT NULL,
-            changed_fields TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
-            prices JSONB NOT NULL DEFAULT '{}'::jsonb,
-            inventory JSONB NOT NULL DEFAULT '{}'::jsonb,
-            shipping JSONB NOT NULL DEFAULT '{}'::jsonb,
-            status TEXT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        )
-        """,
-        "ALTER TABLE product_history ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ",
-        "ALTER TABLE product_history ADD COLUMN IF NOT EXISTS changed_fields TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]",
-        "ALTER TABLE product_history ADD COLUMN IF NOT EXISTS prices JSONB NOT NULL DEFAULT '{}'::jsonb",
-        "ALTER TABLE product_history ADD COLUMN IF NOT EXISTS inventory JSONB NOT NULL DEFAULT '{}'::jsonb",
-        "ALTER TABLE product_history ADD COLUMN IF NOT EXISTS shipping JSONB NOT NULL DEFAULT '{}'::jsonb",
-        "ALTER TABLE product_history ADD COLUMN IF NOT EXISTS status TEXT NULL",
-        "UPDATE product_history SET observed_at = created_at WHERE observed_at IS NULL",
-        "ALTER TABLE product_history ALTER COLUMN observed_at SET NOT NULL",
-        "DROP TABLE IF EXISTS product_change_history",
-        "DROP TABLE IF EXISTS product_latest_fields",
-        "DROP TABLE IF EXISTS product_prices",
-        "DROP TABLE IF EXISTS product_inventory",
-        "DROP TABLE IF EXISTS product_shipping_fees",
-        "CREATE INDEX IF NOT EXISTS idx_products_platform_external_id ON products(platform, external_product_id)",
-        "CREATE INDEX IF NOT EXISTS idx_products_last_collected_at ON products(last_collected_at)",
-        "CREATE INDEX IF NOT EXISTS idx_product_history_product_observed_at ON product_history(product_id, observed_at)",
-        "CREATE INDEX IF NOT EXISTS idx_product_history_changed_fields_gin ON product_history USING GIN(changed_fields)",
-        "CREATE INDEX IF NOT EXISTS idx_product_raw_samples_platform_collected_at ON product_raw_samples(platform, collected_at)",
-        "CREATE INDEX IF NOT EXISTS idx_product_search_ranks_platform_collected_at ON product_search_ranks(platform, collected_at)",
-        "CREATE INDEX IF NOT EXISTS idx_product_discovery_targets_platform_active ON product_discovery_targets(platform, active, first_discovered_at)",
-    )
-    with connection.cursor() as cursor:
-        for statement in statements:
-            cursor.execute(statement)
-    _apply_one_time_migrations(connection)
-    connection.commit()
+    """Create an empty schema or validate an existing one; never repair it implicitly."""
+    from .schema import CREATE_TABLES, CREATE_INDEXES, validate_schema
+    if not uses_current_storage():
+        from .schema import BASE_CREATE_TABLES as CREATE_TABLES, BASE_CREATE_INDEXES as CREATE_INDEXES
+
+    try:
+        # Serialize first-time creation across collector processes.
+        connection.execute("SELECT pg_advisory_xact_lock(724639118504)")
+        existing = connection.execute("SELECT to_regclass('products') AS existing").fetchone()
+        if existing and existing["existing"]:
+            # Runtime credentials cannot run DDL on administrator-owned objects.
+            # Existing schemas are validated; repairs remain explicit migrations.
+            validate_schema(connection)
+            if uses_current_storage():
+                from .product_storage_schema import validate_product_storage
+                validate_product_storage(connection, indexes=True)
+            connection.commit()
+            return
+        for statement in CREATE_TABLES:
+            connection.execute(statement)
+        validate_schema(connection)
+        for statement in CREATE_INDEXES:
+            connection.execute(statement)
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
 
 
 def ensure_schema_initialized(config: PostgresConfig, connection: Connection[Any]) -> None:
-    key = (config.host, config.port, config.database, config.user)
+    key = (config.host, config.port, config.database, config.user, uses_current_storage())
     if key in _SCHEMA_INIT_KEYS:
         return
     with _SCHEMA_INIT_LOCK:
@@ -344,21 +262,6 @@ def ensure_schema_initialized(config: PostgresConfig, connection: Connection[Any
             return
         init_schema(connection)
         _SCHEMA_INIT_KEYS.add(key)
-
-
-def _apply_one_time_migrations(connection: Connection[Any]) -> None:
-    migration_name = "drop_payload_based_change_history_20260904"
-    applied = connection.execute(
-        "SELECT 1 FROM schema_migrations WHERE name = %s",
-        (migration_name,),
-    ).fetchone()
-    if applied:
-        return
-    connection.execute("DROP TABLE IF EXISTS product_change_history")
-    connection.execute(
-        "INSERT INTO schema_migrations (name) VALUES (%s)",
-        (migration_name,),
-    )
 
 
 def save_product_snapshots(
@@ -375,21 +278,10 @@ def save_product_snapshots(
 
     config = load_postgres_config(project_root)
     batch_size = _product_batch_size(project_root)
-    saved_count = 0
     with connect(config) as connection:
         ensure_schema_initialized(config, connection)
-        for batch in _chunks(rows, batch_size):
-            try:
-                saved_count += _save_product_batch_with_retry(connection, batch)
-            except Exception:
-                LOGGER.exception(
-                    "failed PostgreSQL product batch platform=%s count=%d firstExternalProductId=%s",
-                    platform,
-                    len(batch),
-                    batch[0]["external_product_id"] if batch else "",
-                )
-                connection.rollback()
-    return saved_count
+        return _save_product_batches(connection, rows, batch_size)
+
 
 
 def save_products_with_raw_samples_if_enabled(
@@ -492,7 +384,11 @@ class ProductSnapshotSaver:
             connect_timeout=10,
             row_factory=dict_row,
         )
-        ensure_schema_initialized(self._config, self._connection)
+        try:
+            ensure_schema_initialized(self._config, self._connection)
+        except Exception:
+            self.close()
+            raise
         return self._connection
 
 
@@ -506,33 +402,20 @@ def _save_products_with_raw_samples(
     raw_sample_limit: int,
 ) -> dict[str, int]:
     product_list = list(products)
-    retention_limit = _raw_sample_retention_limit(raw_sample_limit)
     raw_rows = _raw_sample_rows(platform, collected_at, product_list, raw_sample_limit)
     snapshot_rows = [_snapshot_row(platform, collected_at, product) for product in _products_without_raw(product_list)]
-    snapshot_rows = [row for row in snapshot_rows if row is not None]
-    if not raw_rows and not snapshot_rows and retention_limit > 0:
-        return {"rawSampleCount": 0, "snapshotCount": 0}
-
-    snapshot_count = 0
     if raw_rows:
-        _insert_raw_sample_rows(connection, raw_rows)
-        _prune_raw_sample_rows(connection, platform, retention_limit)
-        connection.commit()
-    elif retention_limit == 0:
-        _prune_raw_sample_rows(connection, platform, retention_limit)
-        connection.commit()
-    for batch in _chunks(snapshot_rows, batch_size):
         try:
-            snapshot_count += _save_product_batch_with_retry(connection, batch)
-        except Exception:
-            LOGGER.exception(
-                "failed PostgreSQL product batch platform=%s count=%d firstExternalProductId=%s",
-                platform,
-                len(batch),
-                batch[0]["external_product_id"] if batch else "",
-            )
+            _lock_raw_samples(connection, platform)
+            _insert_raw_sample_rows(connection, raw_rows)
+            _prune_raw_sample_rows(connection, platform, MAX_RAW_SAMPLE_RETENTION)
+            connection.commit()
+        except Exception as exc:
             connection.rollback()
+            raise ProductSaveError(platform, [], [row["external_product_id"] for row in snapshot_rows]) from exc
+    snapshot_count = _save_product_batches(connection, snapshot_rows, batch_size, raw_sample_count=len(raw_rows))
     return {"rawSampleCount": len(raw_rows), "snapshotCount": snapshot_count}
+
 
 
 def save_product_snapshots_if_enabled(
@@ -572,14 +455,15 @@ def save_product_raw_samples_if_enabled(
         raise ValueError("limit must be zero or greater")
 
     rows = _raw_sample_rows(platform, collected_at, products, limit)
-    retention_limit = _raw_sample_retention_limit(limit)
-    if not rows and retention_limit > 0:
+    retention_limit = MAX_RAW_SAMPLE_RETENTION
+    if not rows:
         return 0
 
     config = load_postgres_config(project_root)
     with connect(config) as connection:
         ensure_schema_initialized(config, connection)
         if rows:
+            _lock_raw_samples(connection, platform)
             _insert_raw_sample_rows(connection, rows)
         _prune_raw_sample_rows(connection, platform, retention_limit)
         connection.commit()
@@ -860,7 +744,7 @@ def _raw_sample_rows(
     limit: int,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    retention_limit = _raw_sample_retention_limit(limit)
+    retention_limit = min(max(limit, 0), MAX_RAW_SAMPLE_RETENTION)
     for product in products:
         if len(rows) >= retention_limit:
             break
@@ -872,15 +756,16 @@ def _raw_sample_rows(
             {
                 "platform": platform,
                 "external_product_id": external_id,
-                "collected_at": _parse_datetime(collected_at),
+                "collected_at": _parse_datetime(str(product.get("collectedAt") or collected_at)),
                 "payload": raw,
             }
         )
     return rows
 
 
-def _raw_sample_retention_limit(limit: int) -> int:
-    return 0 if limit <= 0 else MAX_RAW_SAMPLE_RETENTION
+def _lock_raw_samples(connection: Connection[Any], platform: str) -> None:
+    # A platform lock keeps concurrent insert + prune transactions within 100.
+    connection.execute("SELECT pg_advisory_xact_lock(%s)", (_lock_key("raw", platform),))
 
 
 def _insert_raw_sample_rows(connection: Connection[Any], rows: list[dict[str, Any]]) -> None:
@@ -906,8 +791,7 @@ def _insert_raw_sample_rows(connection: Connection[Any], rows: list[dict[str, An
 
 def _prune_raw_sample_rows(connection: Connection[Any], platform: str, retention_limit: int) -> None:
     if retention_limit <= 0:
-        connection.execute("DELETE FROM product_raw_samples WHERE platform = %s", (platform,))
-        return
+        raise ValueError("retention_limit must be positive; insertion budget is separate")
     connection.execute(
         """
         DELETE FROM product_raw_samples
@@ -941,13 +825,25 @@ def _save_product_batch_with_retry(connection: Connection[Any], rows: list[dict[
 
 
 def _save_product_batch(connection: Connection[Any], rows: list[dict[str, Any]]) -> int:
+    if len({row["platform"] for row in rows}) > 1:
+        raise ValueError("A product batch must contain exactly one platform")
     unique_rows = _dedupe_product_rows(rows)
     if not unique_rows:
         return 0
+    # Lock even absent products, in deterministic order, before reading history.
+    # This serializes concurrent first inserts as well as updates and replays.
+    lock_keys = sorted({_lock_key(row["platform"], row["external_product_id"]) for row in unique_rows})
+    with connection.cursor() as cursor:
+        cursor.executemany("SELECT pg_advisory_xact_lock(%s)", [(key,) for key in lock_keys])
     external_ids = [row["external_product_id"] for row in unique_rows]
     existing_states = _existing_product_states(connection, unique_rows[0]["platform"], external_ids)
-    history_plans = _history_insert_plans(unique_rows, existing_states)
-    _bulk_upsert_products(connection, unique_rows, existing_states)
+    fresh_rows = [row for row in unique_rows if (
+        row["external_product_id"] not in existing_states
+        or row["collected_at"] > existing_states[row["external_product_id"]]["last_collected_at"]
+    )]
+    history_plans = _history_insert_plans(fresh_rows, existing_states)
+    if fresh_rows:
+        _bulk_upsert_products(connection, fresh_rows, existing_states)
     product_ids = {
         external_id: int(state["id"])
         for external_id, state in existing_states.items()
@@ -957,13 +853,31 @@ def _save_product_batch(connection: Connection[Any], rows: list[dict[str, Any]])
     if missing_external_ids:
         product_ids.update(_product_ids(connection, unique_rows[0]["platform"], missing_external_ids))
     _bulk_insert_history(connection, history_plans, product_ids)
+    if uses_current_storage():
+        from .product_options import save_options
+        for row in fresh_rows:
+            save_options(connection, product_ids[row["external_product_id"]], row)
+        # Even a stale replay can resolve events left unlinked by an earlier writer.
+        connection.execute(
+            "UPDATE product_events e SET product_id=p.id FROM products p "
+            "WHERE e.product_id IS NULL AND e.platform=p.platform "
+            "AND e.external_product_id=p.external_product_id AND p.platform=%s "
+            "AND p.external_product_id=ANY(%s)", (unique_rows[0]["platform"], external_ids),
+        )
     return len(unique_rows)
+
+
+def _lock_key(namespace: str, key: str) -> int:
+    digest = hashlib.sha256(f"{namespace}\0{key}".encode()).digest()[:8]
+    return int.from_bytes(digest, "big", signed=True)
 
 
 def _dedupe_product_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     deduped: dict[str, dict[str, Any]] = {}
     for row in rows:
-        deduped[row["external_product_id"]] = row
+        previous = deduped.get(row["external_product_id"])
+        if previous is None or row["collected_at"] > previous["collected_at"]:
+            deduped[row["external_product_id"]] = row
     return list(deduped.values())
 
 
@@ -978,6 +892,7 @@ def _existing_product_states(
             p.id,
             p.external_product_id,
             p.first_seen_at,
+            p.last_collected_at,
             h.prices,
             h.inventory,
             h.shipping,
@@ -1067,6 +982,7 @@ def _history_state(row: dict[str, Any]) -> dict[str, Any]:
                 "stockQuantity": row["stock_quantity"],
                 "payload": row["inventory_payload"] if _has_inventory_snapshot(row) else {},
                 "options": row["options_payload"],
+                "optionsComplete": row.get("options_complete", False),
             },
             "shipping": {
                 "rows": shipping_rows,
@@ -1082,47 +998,30 @@ def _bulk_upsert_products(
     rows: list[dict[str, Any]],
     existing_states: dict[str, dict[str, Any]],
 ) -> None:
+    columns = [
+        "platform", "external_product_id", "product_name", "product_url", "image_url",
+        "backup_image_url", "source_specific", "status", "seller_external_id", "seller_nickname",
+        "seller_type", "seller_grade", "seller_excellent_seller", "seller_average_satisfaction",
+        "seller_review_count", "first_seen_at", "last_collected_at",
+    ]
+    params = [_product_upsert_params(row, existing_states.get(row["external_product_id"])) for row in rows]
+    if uses_current_storage():
+        columns.extend(CURRENT_COLUMNS)
+        params = [base + current_params(project_current(row)) for row, base in zip(rows, params)]
+    updates = [c for c in columns if c not in {"platform", "external_product_id", "first_seen_at"}]
     with connection.cursor() as cursor:
         cursor.executemany(
-            """
-            INSERT INTO products (
-                platform,
-                external_product_id,
-                product_name,
-                product_url,
-                image_url,
-                backup_image_url,
-                source_specific,
-                status,
-                seller_external_id,
-                seller_nickname,
-                seller_type,
-                seller_grade,
-                seller_excellent_seller,
-                seller_average_satisfaction,
-                seller_review_count,
-                first_seen_at,
-                last_collected_at
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (platform, external_product_id) DO UPDATE SET
-                product_name = EXCLUDED.product_name,
-                product_url = EXCLUDED.product_url,
-                image_url = EXCLUDED.image_url,
-                backup_image_url = EXCLUDED.backup_image_url,
-                source_specific = EXCLUDED.source_specific,
-                status = EXCLUDED.status,
-                seller_external_id = EXCLUDED.seller_external_id,
-                seller_nickname = EXCLUDED.seller_nickname,
-                seller_type = EXCLUDED.seller_type,
-                seller_grade = EXCLUDED.seller_grade,
-                seller_excellent_seller = EXCLUDED.seller_excellent_seller,
-                seller_average_satisfaction = EXCLUDED.seller_average_satisfaction,
-                seller_review_count = EXCLUDED.seller_review_count,
-                last_collected_at = EXCLUDED.last_collected_at
-            """,
-            [_product_upsert_params(row, existing_states.get(row["external_product_id"])) for row in rows],
+            f"INSERT INTO products ({','.join(columns)}) VALUES ({','.join(['%s'] * len(columns))}) "
+            "ON CONFLICT (platform, external_product_id) DO UPDATE SET "
+            + ','.join(f"{c}=EXCLUDED.{c}" for c in updates)
+            + " WHERE EXCLUDED.last_collected_at > products.last_collected_at", params,
         )
+
+
+def current_params(current):
+    return tuple(Jsonb(_json_safe(current[c])) if c in {"price_info", "shipping_info"} else current[c]
+                 for c in CURRENT_COLUMNS)
+
 
 
 def _product_upsert_params(row: dict[str, Any], existing: dict[str, Any] | None) -> tuple[Any, ...]:
@@ -1166,7 +1065,6 @@ def _bulk_insert_history(
             plan["status"],
         )
         for plan in history_plans
-        if plan["external_product_id"] in product_ids
     ]
     if not rows:
         return
@@ -1233,7 +1131,7 @@ def _has_meaningful_payload_value(value: Any, *, ignored_keys: set[str] | None =
 def _snapshot_row(platform: str, collected_at: str, product: dict[str, Any]) -> dict[str, Any] | None:
     external_id = external_product_id(product)
     if not external_id:
-        return None
+        raise ValueError("Product is missing its external product ID")
     current = normalize_current_product(product)
     comparable = comparable_state(product)
     prices = _section_or_empty(comparable, current, "prices")
@@ -1245,7 +1143,7 @@ def _snapshot_row(platform: str, collected_at: str, product: dict[str, Any]) -> 
     return {
         "platform": platform,
         "external_product_id": external_id,
-        "collected_at": _parse_datetime(collected_at),
+        "collected_at": _parse_datetime(str(product.get("collectedAt") or collected_at)),
         "product_name": _first_text(current, "productName", "name", "title"),
         "product_url": _first_text(current, "productUrl", "affiliateUrl", "url"),
         "image_url": _first_text(current, "imageUrl", "productImage"),
@@ -1255,7 +1153,9 @@ def _snapshot_row(platform: str, collected_at: str, product: dict[str, Any]) -> 
         "seller": seller,
         "prices_payload": prices,
         "inventory_payload": inventory,
-        "options_payload": current.get("options") if isinstance(current.get("options"), list) else comparable.get("options", []),
+        "options_payload": current.get("options") if isinstance(current.get("options"), list) else [],
+        "options_complete": current.get("optionsComplete") is True,
+        "markets": _object_or_empty(current.get("markets")),
         "shipping_payload": shipping_payload,
         "primary_price": _decimal_or_none(_extract_primary_price(prices, current)),
         "price_rows": _price_rows(platform, prices, current),
@@ -1285,6 +1185,8 @@ def _source_specific_row(current: dict[str, Any]) -> dict[str, Any]:
     category = current.get("category")
     if isinstance(category, dict) and any(_has_value(value) for value in category.values()):
         row.setdefault("category", category)
+    if isinstance(current.get("markets"), dict):
+        row["markets"] = current["markets"]
     return row
 
 

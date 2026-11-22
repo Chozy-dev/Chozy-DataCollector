@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from product_data_collector.persistence.postgres_storage import save_discovered_product_ids_if_enabled, save_search_ranks_if_enabled
+from product_data_collector.persistence.postgres_storage import require_database_enabled, save_discovered_product_ids_if_enabled, save_search_ranks_if_enabled
 
 from ..api.client import DomeggookApiError, DomeggookClient, ListRequest, create_domeggook_client
 from ..config import DomeggookConfig, find_project_root, load_api_keys, load_config
@@ -105,7 +105,8 @@ def collect_fixed_category_products(
             client=client,
         )
         if (
-            int(discovery.get("failureCount") or 0)
+            discovery.get("status") == "paused"
+            or int(discovery.get("failureCount") or 0)
             or int(discovery.get("runtimeLimitReached") or 0)
             or int(discovery.get("dailyRequestLimitReached") or 0)
             or discovery_only
@@ -157,6 +158,9 @@ def _discover_fixed_category_product_ids(
     stopped_on_page_limit = False
     product_ids: dict[str, None] = {str(product_id): None for product_id in _state_product_ids(state)}
     category_product_ids = _state_category_product_ids(state)
+    if not dry_run and positions:
+        _save_next_state(state_path, collected_at, positions, start_index, _state_page(state),
+                         product_ids=list(product_ids), category_product_ids=category_product_ids)
 
     for position_index, (category, market) in enumerate(positions[start_index:], start=start_index):
         category_ids = category_product_ids.setdefault(category.code, {})
@@ -274,6 +278,7 @@ def _discover_fixed_category_product_ids(
                     search_rank_records.append(record)
 
             if not dry_run:
+                require_database_enabled(project_root)
                 inserted_target_count += save_discovered_product_ids_if_enabled(
                     project_root=project_root,
                     platform="domeggook",
@@ -342,6 +347,8 @@ def _discover_fixed_category_product_ids(
         clear_state(state_path)
 
     return {
+        "status": "failed" if failures else "paused" if stopped_on_page_limit or stopped_on_runtime_limit or stopped_on_daily_request_limit else "completed",
+        "reason": "page_limit_reached" if stopped_on_page_limit else "runtime_limit_reached" if stopped_on_runtime_limit else "daily_request_limit_reached" if stopped_on_daily_request_limit else "range_finished",
         "categoryCount": len(categories),
         "marketCount": len(markets),
         "pageCount": page_count,

@@ -22,6 +22,9 @@ MIN_BACKOFF_SIGNAL_SECONDS = 90.0
 TIMEOUT_BACKOFF_AFTER_ATTEMPT = 2
 
 
+BULK_DETAIL_MIN_READ_TIMEOUT = 45
+
+
 class OwnerclanApiError(Exception):
     pass
 
@@ -84,12 +87,16 @@ class OwnerclanClient:
             self._rate_limiter.wait()
             request_started_at = time.monotonic()
             try:
-                response = self._session.get(
-                    self._endpoint,
-                    params={"query": query},
-                    headers={"Authorization": f"Bearer {token}"},
-                    timeout=self._timeout,
-                )
+                headers = {"Authorization": f"Bearer {token}"}
+                if operation == "itemsbykeys":
+                    response = self._session.post(
+                        self._endpoint, json={"query": query}, headers=headers,
+                        timeout=(min(5, self._timeout), max(BULK_DETAIL_MIN_READ_TIMEOUT, self._timeout)),
+                    )
+                else:
+                    response = self._session.get(
+                        self._endpoint, params={"query": query}, headers=headers, timeout=self._timeout,
+                    )
             except (requests.Timeout, requests.ConnectionError) as exc:
                 duration_seconds = time.monotonic() - request_started_at
                 self._metrics.record_failure(
@@ -111,6 +118,16 @@ class OwnerclanClient:
                 time.sleep(backoff_seconds)
                 continue
             duration_seconds = time.monotonic() - request_started_at
+
+            # Bulk work stops on access/rate rejection; do not hold 100 leases
+            # through repeated provider-limit retries. The shared transport also
+            # persists its blocked state before raising.
+            if operation == "itemsbykeys" and response.status_code in {403, 429}:
+                self._metrics.record_failure(
+                    operation=operation, status_code=response.status_code,
+                    error="access_or_rate_limit", duration_seconds=duration_seconds,
+                )
+                raise OwnerclanHttpError(response.status_code, "bulk detail access or rate limit")
 
             if response.status_code == 401 and allow_auth_retry:
                 self._metrics.record_failure(
@@ -170,7 +187,7 @@ class OwnerclanClient:
                 raise OwnerclanHttpError(response.status_code, _safe_payload_message(payload, response))
             if payload.get("errors"):
                 graphql_error = OwnerclanGraphQLError(payload["errors"])
-                if graphql_error.is_retryable_rate_limit() and attempt < attempts:
+                if operation != "itemsbykeys" and graphql_error.is_retryable_rate_limit() and attempt < attempts:
                     self._metrics.record_failure(
                         operation=operation,
                         status_code=response.status_code,
@@ -266,7 +283,7 @@ def _json_response(response: requests.Response) -> dict[str, Any]:
 
 def _query_operation(query: str) -> str:
     lowered = query.lower()
-    for name in ("allitems", "itemhistories", "category"):
+    for name in ("itemsbykeys", "allitems", "itemhistories", "category"):
         if name in lowered:
             return name
     return "graphql"

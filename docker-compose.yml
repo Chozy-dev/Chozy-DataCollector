@@ -19,6 +19,7 @@ services:
       start_period: 10s
 
   data-collector:
+    profiles: [collectors]
     image: python:3.12-slim
     container_name: product-data-collector-app
     working_dir: /app
@@ -31,21 +32,53 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-      DOMEGGOOK_API_KEY_1: ${DOMEGGOOK_API_KEY_1:?DOMEGGOOK_API_KEY_1 is required}
+      DOMEGGOOK_OpenAPI_KEY: ${DOMEGGOOK_OpenAPI_KEY:?DOMEGGOOK_OpenAPI_KEY is required}
       OWNERCLAN_USERNAME: ${OWNERCLAN_USERNAME:?OWNERCLAN_USERNAME is required}
       OWNERCLAN_PASSWORD: ${OWNERCLAN_PASSWORD:?OWNERCLAN_PASSWORD is required}
       COLLECTOR_LIMIT: ${COLLECTOR_LIMIT:-}
       COLLECTOR_DRY_RUN: ${COLLECTOR_DRY_RUN:-false}
       OWNERCLAN_REFRESH_CATEGORIES: ${OWNERCLAN_REFRESH_CATEGORIES:-true}
     volumes:
-      - .:/app
+      - type: bind
+        source: .
+        target: /app
+        bind:
+          create_host_path: false
     depends_on:
       postgres:
         condition: service_healthy
-    command: >
-      sh -c "pip install --no-cache-dir -r requirements.txt
-      && python scripts/test_postgres_connection.py
-      && python scripts/run_collectors.py"
+    # Starting the development container never calls supplier APIs or changes DB state.
+    command: ["python", "-c", "import signal; signal.pause()"]
+
+  operations:
+    profiles: [operations]
+    build:
+      context: .
+      dockerfile: Dockerfile.operations
+    image: chozy-collector-operations:local
+    working_dir: /app
+    environment:
+      # Passed explicitly by the operator; never assembled from production .env.
+      REVIEWED_COLLECTOR_DSN: ${REVIEWED_COLLECTOR_DSN:-}
+      OWNERCLAN_USERNAME: ${OWNERCLAN_USERNAME:-}
+      OWNERCLAN_PASSWORD: ${OWNERCLAN_PASSWORD:-}
+      OWNERCLAN_ENV: ${OWNERCLAN_ENV:-production}
+    volumes:
+      - type: bind
+        source: .
+        target: /app
+        read_only: true
+        bind:
+          create_host_path: false
+      # Keep the existing checkpoint, retry and log paths used by source YAML.
+      - type: bind
+        source: ./ownerclan_API/data
+        target: /app/ownerclan_API/data
+        bind:
+          create_host_path: false
+    # No dependency starts DB/collectors. Default command is an offline plan.
+    command: ["plan", "--config", "product_data_collector/operations/example.yaml"]
+    stop_grace_period: 3m
 
 volumes:
   postgres_data:

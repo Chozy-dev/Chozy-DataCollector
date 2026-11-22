@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+MAX_ITEMS_BY_KEYS = 100
+
 
 ITEM_FIELDS = """
 createdAt
@@ -26,6 +28,7 @@ shippingType
 images
 status
 options {
+  status
   optionAttributes {
     name
     value
@@ -126,6 +129,8 @@ def all_items_query(
 
 
 def item_histories_query(*, first: int, after: str | None = None, date_from: int | None = None, date_to: int | None = None) -> str:
+    if not 1 <= first <= 1000:
+        raise ValueError("itemHistories first must be between 1 and 1000")
     args: dict[str, Any] = {"first": first}
     if after:
         args["after"] = after
@@ -142,6 +147,20 @@ def item_histories_query(*, first: int, after: str | None = None, date_from: int
 
 def _enum(value: str) -> tuple[str, str]:
     return ("enum", value)
+
+
+def item_query(key: str, *, minimal: bool = False) -> str:
+    return f"query {{ item(key: {json.dumps(key)}) {{ {_fields(minimal)} }} }}"
+
+
+def items_by_keys_query(keys: list[str], *, minimal: bool = False) -> str:
+    if not isinstance(keys, (list, tuple)) or not 1 <= len(keys) <= MAX_ITEMS_BY_KEYS:
+        raise ValueError("itemsByKeys requires between 1 and 100 keys")
+    if any(not isinstance(key, str) or not key.strip() for key in keys):
+        raise ValueError("itemsByKeys keys must be non-empty strings")
+    if len(set(keys)) != len(keys):
+        raise ValueError("itemsByKeys keys must be unique")
+    return f"query {{ itemsByKeys({_format_args({'keys': list(keys)})}) {{ {_fields(minimal)} }} }}"
 
 
 def _format_args(args: dict[str, Any]) -> str:
