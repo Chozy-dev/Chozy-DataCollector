@@ -74,6 +74,16 @@ git diff --check
 
 기본 pytest는 외부 API·DB 없는 단위 테스트만 수집한다. 통합 테스트는 명시적 `COLLECTOR_TEST_POSTGRES_DSN`이 필요하며 host=`127.0.0.1`, dbname=`collector_stage1_test`만 허용한다. fixture는 UUID schema만 생성·삭제하고 `.env`를 읽지 않는다. API probe는 pytest에 포함하지 않으며 `--dry-run`을 오프라인 검증으로 간주하지 않는다. 캐시는 `artifacts/validation/pytest-cache/`다.
 
+### 9월 작업 브랜치 회귀 결과
+
+2026-11-24에 Python 3.12.12로 9월 커밋을 각각 별도 폴더에 풀어 대상 테스트만 다시 실행했다. 당시 동작은 모의 응답과 임시 상태 파일로 확인했다. 현재 `main`의 오프라인 단위 테스트도 **602개 통과**했다. 이번 재검증에는 외부 API와 운영 DB를 사용하지 않았다.
+
+| 범위 | 결과 |
+| --- | --- |
+| 도매꾹 일일 수집 예산 (`3a9e244`, 9월 4일) | **2개 통과**. 남은 요청 예산이 0이면 목록·상세 API 요청 없이 목록의 다음 페이지와 상세의 다음 인덱스를 각각 저장했다. |
+| 쿠팡 키워드 재개 (`fa1d229`, 9월 5일) | **2개 통과**. 모의 dry-run에서 완료 키워드를 건너뛰고 기존 checkpoint를 보존했다. 완료된 키워드만 남은 일반 실행에서는 추가 요청 없이 checkpoint를 지웠다. |
+| PostgreSQL 저장 흐름 (9월 8일) | 당시 [PR #55](https://github.com/Chozy-dev/Chozy-DataCollector/pull/55)에 **167개 통과**로 기록됐다. |
+
 ### 격리 PostgreSQL 검증
 
 ```powershell
