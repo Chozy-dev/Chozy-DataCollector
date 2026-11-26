@@ -11,13 +11,13 @@ from psycopg.types.json import Jsonb
 
 from product_data_collector.domain.scoring import VERSION, calculate, owner_reliability
 from product_data_collector.domain.product_events import utc
-from .postgres_storage import _json_safe
+from .storage_values import json_safe
 
 LOCK = 724639118507
 
 
 def jb(value):
-    return Jsonb(_json_safe(value), dumps=lambda obj: json.dumps(obj, default=lambda v: v.isoformat()))
+    return Jsonb(json_safe(value), dumps=lambda obj: json.dumps(obj, default=lambda v: v.isoformat()))
 
 
 def observed_prices(conn, product, start, as_of):

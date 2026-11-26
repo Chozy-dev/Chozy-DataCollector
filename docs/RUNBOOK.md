@@ -10,13 +10,13 @@
 | --- | --- |
 | PostgreSQL 기존 수집기 | `POSTGRES_ENABLED/HOST/PORT/DB/USER/PASSWORD` |
 | 오너클랜 | `OWNERCLAN_USERNAME/PASSWORD/ENV` |
-| 도매매 | `DOMEGGOOK_OpenAPI_KEY`, Private 승인 후 `DOMEGGOOK_PrivateAPI_KEY/ID/PASSWORD` |
+| 도매매 | `DOMEGGOOK_OpenAPI_KEY`, Private 승인 후 `DOMEGGOOK_PRIVATE_API_KEY` (통합 동기화) |
 | 쿠팡 | `COUPANG_ACCESS_KEY/SECRET_KEY` |
 | 네이버 검색광고 | `NAVER_AD_API_KEY/SECRET_KEY/CUSTOMER_ID` |
 | 네이버 API HUB | `NAVER_HUB_KEY_ID/KEY` |
 | 통합 운영·migration | `--dsn-env`로 이름을 지정한 DSN 환경변수 |
 
-네이버·통합 실행기·migration·scoring CLI는 `.env`를 자동으로 읽지 않는다. 실행 프로세스에 변수를 명시적으로 공급한다. 설정 예제는 `product_data_collector/operations/example.yaml`, `coupang_API/config/best.example.yaml`, `naver_API/season.example.yaml`이다. 빈 카테고리·예산·REVIEW_REQUIRED 값은 검토해 채운다.
+네이버·통합 실행기·migration·scoring CLI에는 환경변수를 실행 프로세스에 명시적으로 공급한다. 통합 실행기의 기존 공급처 로더는 `.env`를 읽을 수 있다. 독립 도매매 `sync_cli`는 기존 `DOMEGGOOK_PrivateAPI_KEY`도 받는다. 설정 예제는 `product_data_collector/operations/example.yaml`, `coupang_API/config/best.example.yaml`, `naver_API/season.example.yaml`이다. 빈 카테고리·예산·REVIEW_REQUIRED 값은 검토해 채운다.
 
 ```powershell
 python -m product_data_collector.operations plan --config product_data_collector/operations/example.yaml
@@ -74,7 +74,7 @@ python -m scripts.migration_preflight --execute --backup-dir C:/dev/Chozy/backup
 python -m scripts.rehearse_migrations --dsn-env OPERATIONS_COPY_DSN
 ```
 
-preflight 기본은 무접속 계획, execute는 Compose 운영 DB 읽기 전용 감사와 **저장소 밖 새 경로**에 custom dump·data/config/.env ZIP·비밀번호 제외role 정의·SHA를 남긴다. migration/수집/권한 변경은 없다. point-in-time 관측으로 writer fence를 대신하지 않는다. 현재 collector superuser와 Spring 별도 역할 부재를 해결하고, SECURITY INVOKER 예산 함수의 EXECUTE만 주거나 예산 테이블 직접UPDATE를 허용하는 단순 설계는 피한다.
+preflight 기본은 무접속 계획, execute는 Compose 운영 DB 읽기 전용 감사와 **저장소 밖 새 경로**에 custom dump·data/config/.env ZIP·비밀번호 제외role 정의·SHA를 남긴다. migration/수집/권한 변경은 없다. point-in-time 관측으로 writer fence를 대신하지 않는다. 계정 전환 상태는 [CONTEXT](CONTEXT.md), 예산 함수와 역할의 권한은 [DATABASE](DATABASE.md#실행-계정과-권한-분리)를 참고한다.
 
 복원은 새 격리 DB에 `pg_restore --exit-on-error --no-owner --no-acl`, 운영 덮어쓰기 금지다. 이 복원은 role/ACL·PITR을 검증하지 않는다. rehearse의 execute는 별도서버 `127.0.0.1:<비표준포트>/collector_operations_copy`만 허용하고 전체 행 해시 비교를 하므로 시간/temp 비용이 든다. 이미 통과한 사본 검증을 운영 모니터링으로 반복하지 않는다. 필요한 사본 백필은 `backfill --dsn-env OPERATIONS_COPY_DSN --name operations-rehearsal --batch-size 500 --max-batches 20`, 대조는 같은 옵션의 `--verify`로 이어간다.
 
@@ -203,7 +203,7 @@ live_e2e는 실제 변경 피드 앞부분의 약 5,000개 key 표본을 대상�
 | 쿠팡 best 계획 | `python -m coupang_API --config coupang.best.local.yaml --date 2026-11-20 --dsn-env COUPANG_BEST_DSN` |
 | 네이버 계획 | `python -m naver_API --config naver.season.local.yaml --date 2026-11-20 --dsn-env NAVER_SEASON_DSN` |
 
-쿠팡·네이버 계획에 실제 호출·저장을 선택하려면 --execute를 추가한다. 도매매 Private sync는 승인 후 확인한 provider-timezone과 초기 start를 지정하며 미완료 재개 시 범위를 바꾸지 않는다. 오너클랜 legacy-categories와 쿠팡 legacy-search는 명시적으로 선택하는 기존 경로다.
+쿠팡·네이버 계획에 실제 호출·저장을 선택하려면 --execute를 추가한다. 도매매 Private sync는 승인 후 확인한 provider-timezone과 초기 start를 지정하며 미완료 재개 시 범위를 바꾸지 않는다. 오너클랜 legacy-categories는 명시적으로 선택하는 기존 경로다.
 
 도매매 동기화의 현재 진입점은 `domeggook_API.workflows.sync_cli`다. 기존 `domeggook_API.workflows.stage4_cli` 명령과 `stage4` import는 같은 구현으로 연결하는 호환용 파일로 남겼다. 새 설정·명령에는 기능 이름을 사용한다. 기존 설정의 `data/state/stage4`는 재개 데이터 경로이므로 이름만 바꾸어 새 작업을 시작하지 않는다. Compose command와 현재 실행 중인 수집 컨테이너의 시작 명령은 변경하지 않았다.
 
@@ -211,13 +211,15 @@ live_e2e는 실제 변경 피드 앞부분의 약 5,000개 key 표본을 대상�
 
 | 경로 | 용도 |
 | --- | --- |
-| `scripts/run_collectors.py`, `run_daily_collector.py` | 기존 개발·표본 실행. 쿠팡은 검색 경로 |
+| `scripts/run_collectors.py`, `run_daily_collector.py` | 오너클랜·도매꾹 개발·표본 실행 |
 | `scripts/check_postgres.py` | 로컬 DB 확인·공통 초기화 |
-| `scripts/export_product_lookup.py` | 상품 조회 결과 내보내기 |
+| `scripts/export_product_lookup.py` | 오너클랜·도매매 상품과 최신 완료 쿠팡 베스트 발행본을 CSV·JSONL로 내보내기 |
 | `scripts/probes/` | 실제 API·변경 피드·묶음 상세 조사. 실행 전 각 --help와 호출 범위를 확인 |
 | `scripts/benchmarks/` | 전용 PostgreSQL 합성 부하·전후 비교. [검증 절차](VALIDATION.md) 참조 |
 
 응답 형식 확인용 상품 예시는 artifacts/samples/에 제공처별 최대 5개만 보관한다. 고정 카테고리 조사 도구의 기본도 5개 카테고리×상품 1개다. 과거 대량 조사를 재현할 때는 외부 백업을 작업 디렉터리에 복원하고, 이력·집계 도구에는 --input-dir, 1만 상품 묶음 실측 도구에는 --source로 원본을 지정한다. 소량 예시를 전체 피드·성능 검증의 입력으로 사용하지 않는다.
+
+`python -m scripts.export_product_lookup --platform coupang`은 PostgreSQL에서 기준일이 가장 최근인 완료 발행본만 읽는다. 여러 카테고리에 나온 상품은 가장 높은 순위의 행을 남긴다. `--platform`을 생략하면 공급처 상품도 함께 내보낸다. 베스트 migration 적용 전이나 완료 발행본이 없을 때 쿠팡 행은 0개다.
 
 Compose 기본 기동은 PostgreSQL만 실행한다. `data-collector`는 `collectors` profile에 있으며, 명시적으로 켜도 Python 대기 프로세스만 실행한다. 컨테이너 기동은 API 호출·DB 초기화·수집을 실행하지 않는다. 통합 운영 이미지는 별도 Dockerfile을 사용한다.
 

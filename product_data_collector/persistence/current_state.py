@@ -1,6 +1,9 @@
 """Latest reads, legacy comparison and bounded history context; no scoring."""
 from product_data_collector.domain.current_state import CURRENT_COLUMNS, project_current, number
 
+from .snapshot_payload import snapshot_row
+from .storage_values import json_safe
+
 
 def legacy_rows(connection, ids):
     return connection.execute(
@@ -15,14 +18,13 @@ def legacy_rows(connection, ids):
 
 
 def legacy_snapshot(record):
-    from .postgres_storage import _snapshot_row
     inventory = record.get("inventory") or {}
     prices = record.get("prices") or {}
     shipping = record.get("shipping") or {}
     inv_payload = dict(inventory.get("payload") or {})
     if "stockQuantity" not in inv_payload and inventory.get("stockQuantity") is not None:
         inv_payload["stockQuantity"] = inventory["stockQuantity"]
-    return _snapshot_row(record["platform"], record["last_collected_at"].isoformat(), {
+    return snapshot_row(record["platform"], record["last_collected_at"].isoformat(), {
         "productId": record["external_product_id"], "prices": prices.get("payload") or {},
         "inventory": inv_payload, "shipping": shipping.get("payload") or {},
         "options": inventory.get("options") or [], "status": record.get("status"),
@@ -52,8 +54,7 @@ def compare_current_batch(connection, *, after_id=0, limit=500):
     differences = []
     for row in legacy_rows(connection, ids):
         expected = project_current(legacy_snapshot(row))
-        from .postgres_storage import _json_safe
-        mismatch = [key for key in CURRENT_COLUMNS if _json_safe(row.get(key)) != _json_safe(expected[key])]
+        mismatch = [key for key in CURRENT_COLUMNS if json_safe(row.get(key)) != json_safe(expected[key])]
         if mismatch:
             differences.append({"product_id": row["id"], "columns": mismatch})
     return {"next_id": ids[-1] if ids else after_id, "checked": len(ids), "differences": differences}

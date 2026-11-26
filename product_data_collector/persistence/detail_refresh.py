@@ -77,8 +77,9 @@ def complete_refresh(connection, claim, product, *, collected_at):
     A request arriving during the lease stays pending after completion. Never use
     a source event occurred_at as collected_at. Returned success is commit-confirmed.
     """
-    from .postgres_storage import _snapshot_row, _save_product_batch, _lock_key
-    row = _snapshot_row(claim["platform"], collected_at, product)
+    from .postgres_storage import _save_product_batch, _lock_key
+    from .snapshot_payload import snapshot_row
+    row = snapshot_row(claim["platform"], collected_at, product)
     if row["external_product_id"] != claim["external_product_id"]:
         raise ValueError("Detail does not match claimed product")
     if row["collected_at"] < claim["refresh_requested_at"]:

@@ -2,6 +2,10 @@
 
 현재 진척은 [CONTEXT](CONTEXT.md), 실행·중단·재개는 [RUNBOOK](RUNBOOK.md), 데이터 의미는 [ARCHITECTURE](ARCHITECTURE.md)와 [API_CONTRACTS](API_CONTRACTS.md)가 기준이다. 이 문서는 최신 결과·측정 조건·한계·재현 근거만 기록한다. 아래 수치는 실측과 조건부 환산을 구분한다.
 
+## 현재 검증 결과
+
+2026-11-26 PostgreSQL 저장 모듈 분리 후 오프라인 단위 회귀 **579 passed**(12.51초), 격리 WSL의 Python 3.12·PostgreSQL 16.15 통합 회귀 **252 passed**(71.36초)다. 기존 상품 저장·이력, 재개·발행 및 쿠팡 완료 발행본 내보내기를 검증했다. 통합 실행과 migration의 오프라인 계획도 확인했다. 최신 JUnit은 `artifacts/validation/unit.xml`, `integration.xml`이다. [회귀 실행 방법](#회귀-실행-방법)
+
 ## 오너클랜 5000개 표본 E2E
 
 **정정:** 아래 과거 실행에는 시험용 `SampleClient`가 보완 후 미반환에서 전송을 차단하는 조건이 개입했다. 실제 `refresh_details`는 그 상품만 pending/retry로 남기고 다음 묶음을 계속 처리한다. 따라서 “실제 수집기가299개에서 중단돼 E2E에 실패했다”는 기존 보고는 철회한다. API의 미반환 관측 자체와 저장/차단 수치는 당시 진단 결과로만 유효하다. 약5,000개 전체 수집 지속·완료시간은 검증되지 않았다.
@@ -59,11 +63,13 @@ coverage/공급사identity 근거0, 신뢰도5,000개 모두NULL을 보존했다
 
 수정 도구는 `scripts.probes.ownerclan_live_e2e`이며 누락 보완/다음 묶음 진행을 실제 worker에 맡긴다. `--bounded-recovery`는 호환 옵션이고 같은 동작이다. 수정 후 결과 경로는 `artifacts/experiments/ownerclan-workflow-e2e/`로 과거 진단 결과와 구분하며 아직 실제 재실행은 없다. 오프라인재생은 `scripts.benchmarks.ownerclan_replay --dump <저장소밖검증백업>`, 기본plan은 모두 무호출이다. 과거 근거는 `artifacts/experiments/ownerclan-live-e2e/bounded-recovery/{measurement,analysis}.json`과 상위 폴더의 `{measurement,selection-attempt,snapshot-replay,analysis}.json`이다. 기존 측정/해시는 덮어쓰지 않고 해석만 정정한다.
 
-## 현재 검증 결과
+## 쿠팡 베스트 실데이터 검증
 
-최신 단위 회귀는 Python3.12.12 **602 passed**(15.97초), 별도 PostgreSQL16·127.0.0.1:55432/collector_stage1_test의 전체 통합 회귀는 **250 passed**(321.42초)다. PR 준비에서 전체 회귀를 재실행했으며 외부API0회·운영DB 변경0회다. 최신 JUnit은 `artifacts/validation/unit.xml`, `integration.xml`에 둔다. 앞선 권한/발행 집중 회귀63개와 worker/controller 지속 처리 회귀1개의 근거는 `publication-access.xml`, `ownerclan-continuation.xml`에 보존한다. 승인된 실제 API 조사는 아래 묶음 비교 실측에 별도로 기록한다. 실제 Spring 프로세스·운영 전체 E2E·1,500만 성능·일일 SLA는 통과한 것으로 보지 않는다.
+2026-11-26 로컬 설정에서 주방용품 1013, 생활용품 1014, 스포츠/레저 1017을 선택했다. 첫 배치는 주방용품의 HTTP 200 응답에서 중복 검증 오류로 중단됐다. 나머지 두 카테고리의 추가 확인에서도 순위 충돌 없이 같은 상품 ID가 여러 순위에 나타났다. 같은 상품의 가장 높은 원본 순위만 저장하도록 수정하고 재검증했다.
 
-새 도구의 무접속 plan, operations plan, Python 문법·문서 로컬 링크/앵커·코드 fence·공백 검사와 `git diff --check`도 통과했다. 이번 전용 컨테이너와 연결된 anonymous volume은 식별 후 제거했다. 측정 집계와 외부 원본 백업은 보존하고 문서 정리용 scratch는 제거했다. 기존 운영 컨테이너·volume·수집 상태는 유지했다.
+격리 PostgreSQL 16.16에서 쿠팡 HTTP 3회로 완료 발행본을 만들었다. 응답/발행 행은 주방용품 94/89, 생활용품 96/73, 스포츠/레저 81/68이고, 세 카테고리를 발행본 조회 함수로 확인했다. 초기 확인 3회와 재검증 3회를 합쳐 총 6회 호출했다. 단위 테스트 579개와 git diff 검사도 통과했다. 운영 DB는 사용하지 않았다. 집계는 `artifacts/validation/coupang-best-live.json`에 보관한다.
+
+## 회귀 실행 방법
 
 ```powershell
 python -m pip install -r requirements-dev.txt
@@ -74,22 +80,12 @@ git diff --check
 
 기본 pytest는 외부 API·DB 없는 단위 테스트만 수집한다. 통합 테스트는 명시적 `COLLECTOR_TEST_POSTGRES_DSN`이 필요하며 host=`127.0.0.1`, dbname=`collector_stage1_test`만 허용한다. fixture는 UUID schema만 생성·삭제하고 `.env`를 읽지 않는다. API probe는 pytest에 포함하지 않으며 `--dry-run`을 오프라인 검증으로 간주하지 않는다. 캐시는 `artifacts/validation/pytest-cache/`다.
 
-### 9월 작업 브랜치 회귀 결과
-
-2026-11-24에 Python 3.12.12로 9월 커밋을 각각 별도 폴더에 풀어 대상 테스트만 다시 실행했다. 당시 동작은 모의 응답과 임시 상태 파일로 확인했다. 현재 `main`의 오프라인 단위 테스트도 **602개 통과**했다. 이번 재검증에는 외부 API와 운영 DB를 사용하지 않았다.
-
-| 범위 | 결과 |
-| --- | --- |
-| 도매꾹 일일 수집 예산 (`3a9e244`, 9월 4일) | **2개 통과**. 남은 요청 예산이 0이면 목록·상세 API 요청 없이 목록의 다음 페이지와 상세의 다음 인덱스를 각각 저장했다. |
-| 쿠팡 키워드 재개 (`fa1d229`, 9월 5일) | **2개 통과**. 모의 dry-run에서 완료 키워드를 건너뛰고 기존 checkpoint를 보존했다. 완료된 키워드만 남은 일반 실행에서는 추가 요청 없이 checkpoint를 지웠다. |
-| PostgreSQL 저장 흐름 (9월 8일) | 당시 [PR #55](https://github.com/Chozy-dev/Chozy-DataCollector/pull/55)에 **167개 통과**로 기록됐다. |
-
 ### 격리 PostgreSQL 검증
 
 ```powershell
-docker run --name chozy-collector-test --publish 127.0.0.1:55432:5432 --env POSTGRES_DB=collector_stage1_test --env POSTGRES_PASSWORD=collector_test_only --detach postgres:16
+docker run --name chozy-collector-test --publish 127.0.0.1:55439:5432 --env POSTGRES_DB=collector_stage1_test --env POSTGRES_PASSWORD=collector_test_only --detach postgres:16
 docker exec chozy-collector-test pg_isready -U postgres -d collector_stage1_test
-$env:COLLECTOR_TEST_POSTGRES_DSN='host=127.0.0.1 port=55432 dbname=collector_stage1_test user=postgres password=collector_test_only'
+$env:COLLECTOR_TEST_POSTGRES_DSN='host=127.0.0.1 port=55439 dbname=collector_stage1_test user=postgres password=collector_test_only'
 python -m pytest tests/integration -q
 ```
 
@@ -306,6 +302,8 @@ python -m scripts.benchmarks.publication_profile
 실행은 승인된 범위에서 `--execute`를 추가한다. publication_profile은 새 schema만 사용하며, operations/publication은 각각의 전용 container명과 1,000개 fixture를 전제로 한다. 원래 재현 조건은 집계/provenance와 대조한다.
 
 ## 근거 색인과 복구 위치
+
+구형 쿠팡 키워드 검색의 8월 산출물 5개는 작업공간의 `backups/retired-coupang-keyword-search-20261126/`에 보관했다.
 
 아래 경로는 별도 표기가 없으면 `artifacts/experiments/` 상대경로다. 대량 원본은 저장소 밖, 일반 예시는 공급처별 최대 5개, 임시 파일은 실험별 scratch에만 둔다. JWT/비밀번호를 결과 로그에 출력하지 않는다.
 

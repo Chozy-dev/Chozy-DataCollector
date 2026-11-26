@@ -18,7 +18,7 @@ PostgreSQL 16을 사용한다. DDL의 실제 기준은 `product_data_collector/p
 
 ### 최신 상품
 
-공통 저장은 [postgres_storage.py](../product_data_collector/persistence/postgres_storage.py), 최신값 투영은 [domain/current_state.py](../product_data_collector/domain/current_state.py)가 담당한다.
+[postgres_storage.py](../product_data_collector/persistence/postgres_storage.py)는 기존 저장 진입점과 배치 트랜잭션을 담당한다. 연결·초기 스키마 검증은 [postgres_connection.py](../product_data_collector/persistence/postgres_connection.py)에 있다. [snapshot_payload.py](../product_data_collector/persistence/snapshot_payload.py)는 상품 응답을 저장 행으로 변환하며, 최신값은 [domain/current_state.py](../product_data_collector/domain/current_state.py)에서 투영한다. 발견 대상·검색 순위 행과 SQL은 [discovery_storage.py](../product_data_collector/persistence/discovery_storage.py), 공통 시간·텍스트·JSON 변환은 [storage_values.py](../product_data_collector/persistence/storage_values.py)에 있다.
 
 - 가격은 `current_supply_price`, `supply_price_status`, `supply_price_basis`로 값과 근거를 함께 저장한다. `source_contract`와 미해결 가격을 구분한다.
 - 재고는 `stock_quantity`, `stock_is_infinite`, 상태와 근거를 함께 저장한다. 9999 sentinel과 정확한 실재고를 구분한다.

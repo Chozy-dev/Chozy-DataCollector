@@ -15,6 +15,7 @@ from product_data_collector.domain.current_state import digest
 from product_data_collector.persistence import postgres_storage as pg
 from product_data_collector.persistence.product_events import insert_events
 from product_data_collector.persistence.product_storage_schema import uses_current_storage
+from product_data_collector.persistence.snapshot_payload import snapshot_row
 
 
 def clock():
@@ -43,7 +44,7 @@ def job_lock(connection, path, job):
 def detail_rows(client, ids):
     observed = clock()  # conservative request start protects against in-flight older replies
     products, failures = parse_detail_products(client.get_item_view(ids), observed)
-    rows = [pg._snapshot_row("domeggook", observed, p) for p in products]
+    rows = [snapshot_row("domeggook", observed, p) for p in products]
     if failures or {r["external_product_id"] for r in rows} != set(ids):
         raise ValueError("Missing or mismatched product details")
     # An error envelope or partial empty detail must never complete a page.

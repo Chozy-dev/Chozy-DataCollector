@@ -1,3 +1,5 @@
+"""Export the supplier catalogue and the latest published Coupang best products."""
+
 from __future__ import annotations
 
 import argparse
@@ -8,7 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from psycopg.rows import dict_row
+from psycopg import Cursor
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -29,13 +31,15 @@ URL_ID_QUERY_KEYS = (
     "selfcode",
     "key",
 )
+SUPPLIERS = ("ownerclan", "domeggook")
 
 
 def main() -> int:
     args = _parse_args()
-    rows = list(_db_rows(args.platform, args.limit))
-    if args.platform in (None, "coupang"):
-        rows.extend(_coupang_jsonl_rows(args.limit))
+    config = load_postgres_config(PROJECT_ROOT)
+    with connect(config) as connection:
+        with connection.cursor() as cursor:
+            rows = list(_db_rows(cursor, args.platform, args.limit))
 
     deduped = _dedupe(rows)
     output_path = PROJECT_ROOT / args.output
@@ -59,66 +63,51 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--platform",
-        choices=("ownerclan", "domeggook", "coupang"),
+        choices=(*SUPPLIERS, "coupang"),
         default=None,
-        help="Limit DB export to one platform. Coupang JSONL rows are still included only for coupang/all.",
+        help="Export one supplier or the latest completed Coupang best batch. Default: all.",
     )
-    parser.add_argument("--limit", type=int, default=None, help="Optional per-source row limit.")
+    parser.add_argument(
+        "--limit", type=int, default=None,
+        help="Optional row limit for the supplier catalogue and for Coupang, separately.",
+    )
     return parser.parse_args()
 
 
-def _db_rows(platform: str | None, limit: int | None) -> Iterable[dict[str, Any]]:
-    if platform == "coupang":
-        return []
+def _db_rows(cursor: Cursor[dict[str, Any]], platform: str | None, limit: int | None) -> Iterable[dict[str, Any]]:
+    if platform != "coupang":
+        cursor.execute(
+            """SELECT platform, external_product_id, product_name, product_url
+                FROM products
+                WHERE platform = ANY(%s)
+                ORDER BY platform, external_product_id
+                LIMIT %s""",
+            (list(SUPPLIERS) if platform is None else [platform], limit),
+        )
+        for row in cursor:
+            yield _lookup_row(**row, source="postgres.products")
 
-    query = """
-        SELECT platform, external_product_id, product_name, product_url
-        FROM products
-    """
-    params: list[Any] = []
-    clauses: list[str] = []
-    if platform:
-        clauses.append("platform = %s")
-        params.append(platform)
-    if clauses:
-        query += " WHERE " + " AND ".join(clauses)
-    query += " ORDER BY platform, external_product_id"
-    if limit is not None:
-        query += " LIMIT %s"
-        params.append(limit)
+    if platform not in (None, "coupang"):
+        return
+    # Supplier-only databases remain exportable before the optional best migration.
+    cursor.execute("SELECT to_regclass('coupang_best_published') AS published_view")
+    if cursor.fetchone()["published_view"] is None:
+        return
 
-    config = load_postgres_config(PROJECT_ROOT)
-    with connect(config) as connection:
-        with connection.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(query, params)
-            for row in cursor:
-                yield _lookup_row(
-                    platform=row["platform"],
-                    external_product_id=row["external_product_id"],
-                    product_name=row["product_name"],
-                    product_url=row["product_url"],
-                    source="postgres.products",
-                )
-
-
-def _coupang_jsonl_rows(limit: int | None) -> Iterable[dict[str, Any]]:
-    count = 0
-    for path in sorted((PROJECT_ROOT / "coupang_API" / "data" / "processed").glob("*_products.jsonl")):
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                product = json.loads(line)
-                yield _lookup_row(
-                    platform="coupang",
-                    external_product_id=product.get("productId"),
-                    product_name=product.get("productName"),
-                    product_url=product.get("productUrl"),
-                    source=str(path.relative_to(PROJECT_ROOT)),
-                )
-                count += 1
-                if limit is not None and count >= limit:
-                    return
+    cursor.execute(
+        """WITH latest AS (
+                SELECT snapshot_date FROM coupang_best_batches
+                WHERE status = 'completed' ORDER BY snapshot_date DESC LIMIT 1
+            )
+            SELECT DISTINCT ON (p.product_id) p.product_id AS external_product_id,
+                   p.product_name, p.product_url
+            FROM coupang_best_published AS p JOIN latest USING (snapshot_date)
+            ORDER BY p.product_id, p.rank, p.category_id
+            LIMIT %s""",
+        (limit,),
+    )
+    for row in cursor:
+        yield _lookup_row(platform="coupang", **row, source="postgres.coupang_best_published")
 
 
 def _lookup_row(

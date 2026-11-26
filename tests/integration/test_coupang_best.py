@@ -10,6 +10,7 @@ from coupang_API.services.best import parse_best_records
 from tests.unit.coupang.test_best import product, payload
 from coupang_API.workflows.best import collect_best
 from product_data_collector.persistence.migrations import apply_migration
+from scripts.export_product_lookup import _db_rows
 
 DAY=date(2026,11,19)
 PREV=date(2026,11,18)
@@ -22,6 +23,18 @@ def test_missing_migration_fails_before_api_without_automatic_ddl(db):
         collect_best(db,c,CONFIG,DAY)
     c.best_products.assert_not_called()
     assert query(db,"SELECT to_regclass('coupang_best_batches') AS table_name")[0]['table_name'] is None
+
+
+def test_lookup_export_works_without_best_migration(db):
+    with db.transaction():
+        db.execute("""INSERT INTO products(platform,external_product_id,product_name,first_seen_at,last_collected_at)
+            VALUES ('ownerclan','W1','supplier name',now(),now()),
+                   ('coupang','legacy-product','legacy name',now(),now())""")
+        with db.cursor() as cursor:
+            rows = list(_db_rows(cursor, None, None))
+            assert list(_db_rows(cursor, "coupang", None)) == []
+
+    assert [(row["external_product_id"], row["source"]) for row in rows] == [("W1", "postgres.products")]
 
 
 @pytest.fixture
@@ -85,6 +98,29 @@ def test_budget_pause_durable_resume_and_last_publication(bestdb):
     assert collect_best(bestdb,c,CONFIG,DAY)=='completed'
     assert c.best_products.call_count==2
     assert read_published(bestdb,1010)['snapshotDate']==DAY
+
+
+def test_lookup_export_uses_latest_completed_batch_across_categories(bestdb):
+    collect_best(bestdb, client(payload(product(99, 1))), CONFIG, date(2026, 11, 17))
+    published = client()
+    published.best_products.side_effect = [
+        payload(dict(product(1, 2), productName="lower rank"), product(2, 1)),
+        payload(dict(product(1, 1), productName="higher rank"), product(3, 2)),
+    ]
+    assert collect_best(bestdb, published, CONFIG, PREV) == "completed"
+    assert collect_best(bestdb, client(payload(product(98, 1))), BestConfig(CONFIG.categories, 1, 10), DAY) == "paused"
+
+    with bestdb.cursor() as cursor:
+        rows = list(_db_rows(cursor, "coupang", 2))
+        all_rows = list(_db_rows(cursor, None, None))
+
+    assert [(row["external_product_id"], row["source"]) for row in all_rows] == [
+        ("1", "postgres.coupang_best_published"),
+        ("2", "postgres.coupang_best_published"),
+        ("3", "postgres.coupang_best_published"),
+    ]
+    assert [row["external_product_id"] for row in rows] == ["1", "2"]
+    assert rows[0]["product_name"] == "higher rank"
 
 
 @pytest.mark.parametrize('failure',['api','rcode','malformed'])

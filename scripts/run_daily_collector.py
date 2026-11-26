@@ -14,8 +14,6 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from coupang_API.config import load_config as load_coupang_config
-from coupang_API.workflows.collector import collect_once as collect_coupang_once
 from domeggook_API.workflows.main import run as run_domeggook
 from ownerclan_API.workflows.main import run as run_ownerclan
 
@@ -25,7 +23,7 @@ LOGGER = logging.getLogger("daily_collector")
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run one daily product collector and write an operation status file.")
-    parser.add_argument("--platform", required=True, choices=("ownerclan", "domeggook", "coupang"))
+    parser.add_argument("--platform", required=True, choices=("ownerclan", "domeggook"))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--ownerclan-workers", type=int, default=8)
     parser.add_argument("--ownerclan-rate-limit-retry-seconds", type=int, default=90)
@@ -45,7 +43,7 @@ def main() -> int:
     result: Any
     try:
         result = _run_platform(args)
-        exit_code = _exit_code(args.platform, result)
+        exit_code = _exit_code(result)
     except Exception as exc:
         LOGGER.exception("daily collector failed platform=%s", args.platform)
         result = {"error": str(exc)}
@@ -76,26 +74,21 @@ def _run_platform(args: argparse.Namespace) -> Any:
             max_failure_restarts=max(args.ownerclan_max_failure_restarts, 0),
             category_workers=max(args.ownerclan_workers, 1),
         )
-    if args.platform == "domeggook":
-        max_runtime_seconds = None
-        if args.domeggook_max_runtime_hours is not None and args.domeggook_max_runtime_hours > 0:
-            max_runtime_seconds = args.domeggook_max_runtime_hours * 3600
-        return run_domeggook(
-            PROJECT_ROOT,
-            PROJECT_ROOT / "domeggook_API" / "config" / "config.yaml",
-            max_runtime_seconds=max_runtime_seconds,
-            max_api_calls=args.domeggook_max_api_calls,
-            mode="daily",
-            recent_pages_per_position=max(args.domeggook_recent_pages_per_position, 1),
-            dry_run=args.dry_run,
-        )
-    config = load_coupang_config(PROJECT_ROOT / "coupang_API" / "config" / "config.yaml")
-    return {"exitCode": collect_coupang_once(PROJECT_ROOT, config, dry_run=args.dry_run)}
+    max_runtime_seconds = None
+    if args.domeggook_max_runtime_hours is not None and args.domeggook_max_runtime_hours > 0:
+        max_runtime_seconds = args.domeggook_max_runtime_hours * 3600
+    return run_domeggook(
+        PROJECT_ROOT,
+        PROJECT_ROOT / "domeggook_API" / "config" / "config.yaml",
+        max_runtime_seconds=max_runtime_seconds,
+        max_api_calls=args.domeggook_max_api_calls,
+        mode="daily",
+        recent_pages_per_position=max(args.domeggook_recent_pages_per_position, 1),
+        dry_run=args.dry_run,
+    )
 
 
-def _exit_code(platform: str, result: Any) -> int:
-    if platform == "coupang":
-        return int(result.get("exitCode") or 0) if isinstance(result, dict) else 1
+def _exit_code(result: Any) -> int:
     if not isinstance(result, dict):
         return 1
     for stage in result.values():
@@ -126,11 +119,9 @@ def _reason(platform: str, result: Any, exit_code: int) -> str:
         return "daily_request_limit_reached"
     if platform == "ownerclan":
         return "ownerclan_history_and_refresh_finished"
-    if platform == "domeggook":
-        if _recent_discovery_ran(result):
-            return "all_domeggook_details_finished_and_recent_products_checked"
-        return "all_domeggook_details_finished"
-    return "all_coupang_keywords_finished"
+    if _recent_discovery_ran(result):
+        return "all_domeggook_details_finished_and_recent_products_checked"
+    return "all_domeggook_details_finished"
 
 
 def _paused_stage(result: Any) -> dict[str, Any] | None:
