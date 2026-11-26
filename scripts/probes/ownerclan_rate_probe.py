@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from product_data_collector.operations.budget import SupplierSession
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -59,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     username, password = load_credentials(project_root)
 
     timeout = args.timeout if args.timeout is not None else config.request.timeout_seconds
-    session = requests.Session()
+    session = SupplierSession()
     provider = JwtProvider(username, password, config.environment, timeout, session=session)
     token = provider.token()
     endpoint = API_ENDPOINTS[config.environment]

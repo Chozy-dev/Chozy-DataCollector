@@ -94,7 +94,7 @@ Spring은 HTTP envelope·직렬화·기본 선택·사용자 로직을 담당한
 
 네 기존 migration의 식별자/DDL은 유지하며, 새 `runtime_budget_guard`는 차단 함수를 추가하는 별도 명시적 migration이다. 권한 계획은 이 함수와 기존 네 migration이 있는 사본에서 생성한다. 신규 배포의 BudgetSession은 이 함수를 사용하므로 helper 적용 후 새 코드를 배포한다. 기존 schema의 수집 startup은 구조/인덱스 검사만 수행하고 DDL 복구는 관리자 migration으로 남긴다.
 
-이번 범위는 공급 수집·점수·통합 운영이다. 쿠팡/네이버 조회와 저장 권한, tenant/account별 격리, 실제 Spring 프로세스 로그인 설정은 별도 전환 항목이다. 예산을 늘리거나 차단을 푸는 policy 변경은 관리자 작업이다. 재현·운영 전환은 [RUNBOOK](RUNBOOK.md#권한-분리-사본-검증과-배포), 검증 결과는 [VALIDATION](VALIDATION.md#db-권한-분리-검증)에 둔다.
+이번 범위는 공급 수집·점수·통합 운영이다. 쿠팡/네이버 조회와 저장 권한, tenant/account별 격리, 실제 Spring 프로세스 로그인 설정은 별도 전환 항목이다. 예산을 늘리거나 차단을 푸는 policy 변경은 관리자 작업이다. 재현·운영 전환은 [운영 전환](DEPLOYMENT.md#권한-분리-사본-검증과-배포), 검증 결과는 [VALIDATION](VALIDATION.md#db-권한-분리-검증)에 둔다.
 
 ## Migration과 백필
 
@@ -111,13 +111,14 @@ Spring은 HTTP envelope·직렬화·기본 선택·사용자 로직을 담당한
 | 7 | `stage7_history_policy_v2` | 90일 정책·관측 가격 준비 상태 보완 | [scoring_policy_schema.py](../product_data_collector/persistence/scoring_policy_schema.py) |
 | 8 | `stage10_scoring_performance` | 점수 SQL·영향 전파 최적화 | [scoring_invalidation_schema.py](../product_data_collector/persistence/scoring_invalidation_schema.py) |
 | 9 | `runtime_budget_guard` | runtime용 차단 함수 추가(권한 적용은 별도) | [access.py](../product_data_collector/persistence/access.py) |
+| 10 | `shared_api_budget` | 시간 한도, API와 상위 정책의 원자 예약·차단 | [shared_budget_schema.py](../product_data_collector/persistence/shared_budget_schema.py) |
 
 필요한 기능의 선행 migration부터 적용한다. 구현 파일은 기능 이름으로 바꿨으며, 위 식별자와 적용 순서·DDL은 그대로 유지한다. 식별자는 `schema_migrations`에 저장된 값이므로 파일 이름에 맞춰 바꾸지 않는다. 기존 SQL 트리거 이름과 기본 백필 작업 이름도 저장 상태와 연결되므로 유지한다. 적용에는 명시적인 DSN이 필요하며 `.env`를 자동으로 읽지 않는다. 운영 사본의 계획·백업·lock 비용을 검토한 뒤 실행한다.
 
-`stage7_supply_scoring`은 기존 상품을 참조하는 점수·큐·발행 테이블과 trigger를 추가하며, migration 자체가 기존 상품 전체의 점수를 채우거나 추천을 발행하지는 않는다. 기존 상품의 첫 전체 점수는 `initial` 실행이 필요하다. `stage8_operations`는 이 점수 스키마를 전제로 입력 보호·완료 revision과 공동 예산을 추가한다. 오너클랜만 전환할 때 쿠팡/네이버 migration은 별도 기능이며, 실제 전환 순서와 재개 계약은 [RUNBOOK](RUNBOOK.md#운영-전환-준비와-적용-순서)을 따른다.
+`stage7_supply_scoring`은 기존 상품을 참조하는 점수·큐·발행 테이블과 trigger를 추가하며, migration 자체가 기존 상품 전체의 점수를 채우거나 추천을 발행하지는 않는다. 기존 상품의 첫 전체 점수는 `initial` 실행이 필요하다. `stage8_operations`는 이 점수 스키마를 전제로 입력 보호·완료 revision과 공동 예산을 추가한다. 오너클랜만 전환할 때 쿠팡/네이버 migration은 별도 기능이며, 실제 전환 순서와 재개 계약은 [운영 전환](DEPLOYMENT.md#운영-전환-준비와-적용-순서)을 따른다.
 
 2026-11-21 복원 사본에서 `stage2_storage_contract`의 필수 컬럼·인덱스 및 공통 schema 검증을 통과했다. 따라서 stage1 ledger 부재만으로 stage1을 재적용하지 않았다. 누락된 위 5~8 순서의 네 migration은 사본에만 적용·재실행 검증했고 운영 ledger는 그대로다. 기존 데이터 전체 보존·백필 대조 결과는 [VALIDATION](VALIDATION.md#운영-db-복원과-통합-실행-준비)에 둔다. `CREATE INDEX`는 concurrent 방식이 아니므로 운영 writer와 충돌할 수 있으며, 사본의 짧은 실행시간을 운영 lock 보장으로 사용하지 않는다.
 
-로컬 Docker DB 적용 상태는 [CONTEXT](CONTEXT.md#구현과-운영-상태)에 기록한다. 운영 대상은 적용 직전에 ledger, 역할·ACL, 백업과 복원 가능성, 잠금, 디스크 여유를 [RUNBOOK](RUNBOOK.md#운영-전환-준비와-적용-순서)대로 확인한다. 1,500만 상품의 발행·인덱스·보관 용량은 [별도 검증 과제](VALIDATION.md#1500만-규모와-운영-승인-전-남은-조건)다.
+로컬 Docker DB 적용 상태는 [CONTEXT](CONTEXT.md#구현과-운영-상태)에 기록한다. 운영 대상은 적용 직전에 ledger, 역할·ACL, 백업과 복원 가능성, 잠금, 디스크 여유를 [운영 전환](DEPLOYMENT.md#운영-전환-준비와-적용-순서)대로 확인한다. 1,500만 상품의 발행·인덱스·보관 용량은 [별도 검증 과제](VALIDATION.md#1500만-규모와-운영-승인-전-남은-조건)다.
 
 구형 데이터는 [backfill.py](../product_data_collector/persistence/backfill.py)의 제한된 keyset batch로 옮긴다. 같은 이름으로 반복하여 재개하고, `--verify`의 next_id로 다음 범위를 대조한다. `--integrity-counts`는 명시적인 전체 스캔이다. 과거 history로 원본 사건을 생성하지 않는다. 실제 명령과 복구는 [RUNBOOK](RUNBOOK.md)에 둔다.

@@ -5,6 +5,7 @@ No provider RPM is assumed. Callers supply an operational limiter and budget.
 """
 import time
 import requests
+from product_data_collector.operations.budget import SupplierSession
 
 from .client import (DomeggookApiError, DomeggookHttpError, DomeggookResponseError,
                      DomeggookTimeoutError, consume_budget, _retry_after_seconds)
@@ -18,7 +19,7 @@ class PrivateSyncClient:
         self._key = api_key
         self.limiter = rate_limiter
         self.budget = request_budget
-        self.session = session or requests.Session()
+        self.session = session or SupplierSession()
         self.timeout = timeout
         self.max_retries = max_retries
 

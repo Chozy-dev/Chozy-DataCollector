@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from product_data_collector.operations.budget import SupplierSession
 from dotenv import load_dotenv
 
 
@@ -68,7 +69,7 @@ def main() -> int:
     output_dir = project_root / OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    session = requests.Session()
+    session = SupplierSession()
     client_ip = os.getenv("DOMEGGOOK_LOGIN_IP") or resolve_public_ip(session)
     login_params = {
         "ver": "4.1",

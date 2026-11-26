@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import requests
+from product_data_collector.operations.budget import SupplierSession
 
 from ..api.auth import generate_authorization
 from ..api.rate_limiter import RateLimiter
@@ -57,7 +58,7 @@ class CoupangPartnersClient:
         self._secret_key = secret_key
         self._rate_limiter = rate_limiter
         self._timeout = timeout
-        self._session = session or requests.Session()
+        self._session = session or SupplierSession()
 
     def best_products(self, request: BestCategoryRequest) -> dict[str, Any]:
         # One HTTP attempt: the daily workflow reserves every call durably.

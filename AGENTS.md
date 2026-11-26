@@ -4,7 +4,7 @@
 
 `README.md`와 `docs/CONTEXT.md`를 읽고 작업 범위에 해당하는 문서만 추가로 읽는다. 현재 진척·다음 작업은 CONTEXT가 기준이며, `artifacts/`의 과거 기록을 현재 구현 상태로 간주하지 않는다.
 
-외부 API의 호출 한도와 원본 근거는 [API_CONTRACTS](docs/API_CONTRACTS.md#외부-api-호출-한도)에서 확인한다. 최종 실측의 조건·한계와 근거 위치는 [VALIDATION](docs/VALIDATION.md)에 둔다.
+외부 API의 호출 한도와 원본 근거는 [API_USAGE](docs/API_USAGE.md)에서 확인한다. 최종 실측의 조건·한계와 근거 위치는 [VALIDATION](docs/VALIDATION.md)에 둔다.
 
 ## 구조와 변경 범위
 
@@ -34,7 +34,7 @@ git diff --check
 
 ## 문서 유지
 
-현재 진척·다음 작업은 CONTEXT, 구조·정책은 ARCHITECTURE/API_CONTRACTS/DATABASE, 실행은 RUNBOOK, 최신 검증 결과는 VALIDATION에 반영한다. 같은 내용을 여러 문서에 복사하지 말고 연결한다. 새로운 STAGE 보고서·날짜별 완료 보고서·중복 README는 만들지 않는다. 결과는 조건·핵심 수치·한계만 간단히 갱신한다.
+현재 진척·다음 작업은 CONTEXT, 구조·정책은 ARCHITECTURE/API_CONTRACTS/DATABASE, 실행은 RUNBOOK, 운영 전환은 DEPLOYMENT, 최신 검증 결과는 VALIDATION에 반영한다. 같은 내용을 여러 문서에 복사하지 말고 연결한다. 새로운 STAGE 보고서·날짜별 완료 보고서·중복 README는 만들지 않는다. 결과는 조건·핵심 수치·한계만 간단히 갱신한다.
 
 ## 작업 결과 전달
 

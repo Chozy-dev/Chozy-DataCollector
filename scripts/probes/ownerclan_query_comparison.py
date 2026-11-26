@@ -13,6 +13,7 @@ import sys
 import time
 
 import requests
+from product_data_collector.operations.budget import SupplierSession
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -58,7 +59,7 @@ def assess(keys, nodes):
                 and valid == expected)
 
 
-class MeasuredSession(requests.Session):
+class MeasuredSession(SupplierSession):
     def __init__(self, result, save, *, max_reads=8, max_seconds=245):
         super().__init__()
         self.result, self.save = result, save

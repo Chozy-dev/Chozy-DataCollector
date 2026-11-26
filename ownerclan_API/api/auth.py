@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 import requests
+from product_data_collector.operations.budget import SupplierSession
 
 
 AUTH_ENDPOINTS = {
@@ -33,7 +34,7 @@ class JwtProvider:
         self._password = password
         self._environment = environment
         self._timeout = timeout_seconds
-        self._session = session or requests.Session()
+        self._session = session or SupplierSession()
         self._token: str | None = None
         self._exp: int | None = None
 

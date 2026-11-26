@@ -20,7 +20,7 @@ from product_data_collector.persistence.migrations import apply_migration
 from product_data_collector.persistence.postgres_storage import init_schema
 
 MIGRATIONS = ('stage7_supply_scoring', 'stage8_operations', 'stage7_history_policy_v2',
-              'stage10_scoring_performance', 'runtime_budget_guard')
+              'stage10_scoring_performance', 'runtime_budget_guard', 'shared_api_budget')
 OUT = Path('artifacts/validation/database-access.json')
 
 
@@ -124,7 +124,7 @@ def run(dsn):
         connects, _ = provision(c,'public','copy_access',dsn)
         plan_path = Path('artifacts/validation/database-access-plan.sql')
         plan_path.parent.mkdir(parents=True,exist_ok=True)
-        plan_path.write_text('-- Requires existing four migrations + runtime_budget_guard; new roles only.\nBEGIN;\n'+plan+'\nCOMMIT;\n',encoding='utf8')
+        plan_path.write_text('-- Requires migrations through shared_api_budget; new roles only.\nBEGIN;\n'+plan+'\nCOMMIT;\n',encoding='utf8')
         result['copy'] = check_access(c,connects)
         with connects['collector']() as runtime:
             init_schema(runtime)

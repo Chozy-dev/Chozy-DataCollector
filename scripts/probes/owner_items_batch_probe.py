@@ -12,12 +12,13 @@ import sys
 import time
 
 import requests
+from product_data_collector.operations.budget import SupplierSession
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 
-class GraphqlPostSession(requests.Session):
+class GraphqlPostSession(SupplierSession):
     """Accept both legacy GET queries and the client's native POST JSON."""
 
     def request(self, method, url, **kwargs):

@@ -56,9 +56,11 @@ artifacts/              실행·조사·검증 산출물, Git 제외
 | --- | --- |
 | [CONTEXT](docs/CONTEXT.md) | 현재 구현·미완료 기능·다음 작업·코드 위치 |
 | [ARCHITECTURE](docs/ARCHITECTURE.md) | 코드 책임·데이터 흐름·점수 산식·정합성 |
-| [API_CONTRACTS](docs/API_CONTRACTS.md) | [외부 API 호출 한도](docs/API_CONTRACTS.md#외부-api-호출-한도), 필드 매핑·응답 제약 |
+| [API_USAGE](docs/API_USAGE.md) | 양 서버 기능별 호출 수와 공급사 한도 |
+| [API_CONTRACTS](docs/API_CONTRACTS.md) | 필드 매핑·응답 제약 |
 | [DATABASE](docs/DATABASE.md) | 테이블·조회·migration·백필 |
-| [RUNBOOK](docs/RUNBOOK.md) | 설정·실행·중단·재개·배포 |
+| [RUNBOOK](docs/RUNBOOK.md) | 설정·실행·중단·재개 |
+| [DEPLOYMENT](docs/DEPLOYMENT.md) | 운영 전환·DB 사본 검증·권한 배포 |
 | [VALIDATION](docs/VALIDATION.md) | 검증 명령·최신 결과·실측 조건과 한계 |
 
 저장소 작업 규칙은 [AGENTS.md](AGENTS.md)를 따른다. 처음에는 README → CONTEXT → 해당 작업의 기준 문서 순서로 읽는다.

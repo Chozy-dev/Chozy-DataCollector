@@ -12,6 +12,7 @@ import sys
 import time
 
 import requests
+from product_data_collector.operations.budget import SupplierSession
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -207,7 +208,7 @@ def main(argv=None):
             save()
 
     try:
-        with requests.Session() as session:
+        with SupplierSession() as session:
             token = send(session, "auth")
             for rate in rates:
                 label = f"rate-{rate:g}"
