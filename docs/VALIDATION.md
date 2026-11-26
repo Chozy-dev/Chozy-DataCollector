@@ -187,6 +187,12 @@ timeout+network backoff는 위 지연 구간의 58.2%지만 성공 HTTP도 평�
 
 ## 도매매 Private 동기화 재호출
 
+2026-11-25 02:17 KST, 같은 로컬 환경에서 `_search`를 아래와 같은 조회 조건으로 1회 재호출했다. HTTP 200(0.158초), `result=false`, `401/UNAUTHORIZED`, 상세 메시지 `승인되지 않은 IP 입니다`가 반환됐다. 재시도·페이지 순회·DB 접근은 없었다.
+
+2026-11-25 02:09 KST, 로컬에서 `_search`를 최근 24시간·`size=1`·`channel.supply=true`·`no` 내림차순으로 1회 호출했다. 0.249초에 HTTP 200과 `result=false`, 오류 `401`(`권한이 없습니다`)가 반환됐다. 이번 호출에서 확인한 값으로는 거부 사유를 특정할 수 없다. 재시도·페이지 순회·DB 접근은 없었다.
+
+같은 날 02:13 KST, 같은 Private 키로 ES 상품상세조회 `getItemViewES` v4.0(`market=supply`, 상품번호 `12473769`)를 1회 호출했다. HTTP 200(0.172초)과 요청한 상품의 상세 응답을 확인했다. 동기화 `_search`의 권한 거부는 위 응답에 기록했다.
+
 2026-11-21 17:02 KST, `_search` 최근 24시간·size=1·channel.supply=true·no 내림차순으로 1회, 0.190초에 HTTP 200이나 `result=false`, `401/UNAUTHORIZED`, `승인되지 않은 IP 입니다`였다. retry·페이지 순회·DB 저장은 없었다. 승인·성공 응답·시간대/종료/완전성·한도는 미검증이다. 근거는 `artifacts/validation/domeggook-private-sync.json`. 과거 getItemViewES의 HTTP 429(약180~190 RPM)를 Private 한도에 대입하지 않는다.
 
 ## 운영 DB 복원과 통합 실행 준비
