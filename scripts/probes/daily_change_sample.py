@@ -18,6 +18,7 @@ from urllib.parse import urlparse, parse_qs
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 import requests
+from product_data_collector.operations.budget import SupplierSession
 from dotenv import load_dotenv
 from domeggook_API.api.client import DomeggookClient, ListRequest
 from domeggook_API.api.rate_limiter import RateLimiter as DomeLimiter
@@ -93,7 +94,7 @@ class Survey:
 
     def session(self, source):
         survey = self
-        class Session(requests.Session):
+        class Session(SupplierSession):
             def request(self, method, url, **kwargs):
                 survey.guard(source)
                 survey.pace[source].wait()

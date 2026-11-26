@@ -102,8 +102,9 @@ def policy(db, limits, integrated=False):
                (Jsonb(limits),integrated)); db.commit()
 
 
-@pytest.mark.parametrize('kind',['second','minute','day','month'])
+@pytest.mark.parametrize('kind',['second','minute','hour','day','month'])
 def test_budget_periods_and_no_refund(ops,kind):
+    apply_migration(ops, 'shared_api_budget')
     policy(ops,{kind:1})
     assert reserve(ops)=='reserved'
     ops.rollback()
@@ -216,7 +217,10 @@ def test_budget_timeout_and_restriction_are_durable(ops,db_factory):
     with pytest.raises(TimeoutError): transport.get('https://fixture.invalid')
     assert ops.execute('SELECT reserved FROM api_budget_usage').fetchone()['reserved']==1
     ops.commit()
-    class Response: status_code=429
+    class Response:
+        status_code=429
+
+        def close(self): pass
     class Limited:
         def request(self,*a,**kw): return Response()
     transport.session=Limited()
@@ -237,6 +241,143 @@ def test_budget_missing_helper_stops_before_reservation_or_http(ops, db_factory)
     with pytest.raises(BudgetStopped,match='runtime_budget_guard_missing'):
         session.get('https://fixture.invalid')
     assert ops.execute('SELECT count(*) AS n FROM api_budget_usage').fetchone()['n'] == 0
+
+
+def test_shared_budget_migration_preserves_usage_and_function_grants(ops):
+    policy(ops, {'day': 2}, True)
+    assert reserve(ops, True) == 'reserved'
+    ops.execute('ALTER FUNCTION reserve_api_call(text,text,boolean) SECURITY DEFINER')
+    ops.execute('REVOKE EXECUTE ON FUNCTION reserve_api_call(text,text,boolean) FROM PUBLIC')
+    ops.commit()
+    original = ops.execute("""SELECT proowner,proacl,prosecdef FROM pg_proc
+        WHERE oid=to_regprocedure('reserve_api_call(text,text,boolean)')""").fetchone()
+    apply_migration(ops, 'shared_api_budget')
+    actual = ops.execute("""SELECT proowner,proacl,prosecdef FROM pg_proc
+        WHERE oid=to_regprocedure('reserve_api_call(text,text,boolean)')""").fetchone()
+    assert actual == original
+    assert reserve(ops, True) == 'reserved'
+    assert reserve(ops, True) == 'exhausted:day'
+
+
+def test_coupang_best_leaves_report_capacity_and_blocks_shared_parent(ops, db_factory):
+    from product_data_collector.operations.budget import BudgetSession, BudgetStopped
+    from product_data_collector.operations.budget_policy import install_policies
+    from requests import Response
+
+    apply_migration(ops, 'shared_api_budget')
+    install_policies(ops, [
+        dict(account='coupang', api='best', limits={'hour': 3}, shared_api='default', platform_integrated=True),
+        dict(account='coupang', api='default', limits={'hour': 3}, platform_integrated=True),
+    ])
+    ops.commit()
+    url = 'https://api-gateway.coupang.com/v2/products/bestcategories/1001'
+
+    class HTTP:
+        body = b'{"rCode":0}'
+        calls = 0
+
+        def request(self, *_args, **_kwargs):
+            self.calls += 1
+            response = Response()
+            response.status_code = 200
+            response._content = self.body
+            response._content_consumed = True
+            return response
+
+    http = HTTP()
+    reports = BudgetSession(http, db_factory, 'coupang', 'default')
+    best = BudgetSession(http, db_factory, 'coupang', 'best', parents={'best': 'default'})
+    with pytest.raises(BudgetStopped, match='shared_policy_missing'):
+        best.get(url)
+    ops.execute("UPDATE api_budget_policy SET limits='{\"hour\":1}' WHERE api='best'")
+    ops.commit()
+    best.get(url)
+    with pytest.raises(BudgetStopped, match='exhausted:hour'):
+        best.get(url)
+    reports.get('https://api-gateway.coupang.com/v2/products/search')
+    ops.execute("UPDATE api_budget_policy SET limits='{\"hour\":2}' WHERE api='best'")
+    ops.commit()
+    http.body = b'{"rCode":403}'
+    with pytest.raises(BudgetStopped, match='provider_restricted'):
+        best.get(url)
+    with pytest.raises(BudgetStopped, match='blocked'):
+        reports.get('https://api-gateway.coupang.com/v2/products/search')
+    assert http.calls == 3
+    assert dict((r['api'], r['reserved']) for r in ops.execute(
+        'SELECT api,reserved FROM api_budget_usage')) == {'default': 3, 'best': 2}
+
+
+def test_hub_routes_share_total_under_concurrency_with_separate_usage(ops, db_factory):
+    from product_data_collector.operations.budget_policy import install_policies
+
+    apply_migration(ops, 'shared_api_budget')
+    install_policies(ops, [
+        dict(account='hub-key', api=api, limits=limits, shared_api=parent, platform_integrated=True)
+        for api, limits, parent in [
+            ('trend', {'month': 2}, 'hub'), ('shopping', {'month': 12}, 'hub'),
+            ('hub', {'hour': 7}, None),
+        ]
+    ])
+    ops.commit()
+    workers = [(db_factory(), 'trend' if i % 2 else 'shopping') for i in range(20)]
+
+    def reserve_route(worker):
+        conn, api = worker
+        row = conn.execute("SELECT reserve_api_call('hub-key',%s,true) AS result", (api,)).fetchone()
+        conn.commit()
+        return row['result']
+
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        results = list(pool.map(reserve_route, workers))
+    assert results.count('reserved') == 7
+    assert all(r in ('reserved', 'exhausted:hour', 'exhausted:month') for r in results)
+    usage = {r['api']: r['reserved'] for r in ops.execute('SELECT api,reserved FROM api_budget_usage')}
+    assert usage['hub'] == usage.get('trend', 0) + usage.get('shopping', 0) == 7
+    assert usage.get('trend', 0) <= 2
+
+
+def test_standalone_supplier_session_reserves_before_wire(ops, db_factory, monkeypatch):
+    import psycopg
+    import requests
+    from product_data_collector.operations.budget import BudgetStopped, SupplierSession
+
+    apply_migration(ops, 'shared_api_budget')
+    policy(ops, {'day': 1}, True)
+    monkeypatch.setenv('COLLECTOR_REQUIRE_SHARED_BUDGET', 'true')
+    monkeypatch.delenv('COLLECTOR_SHARED_BUDGET_DSN', raising=False)
+    url = 'https://api.ownerclan.com/v1/graphql'
+    calls = []
+
+    def send(_, request, **kwargs):
+        with db_factory() as conn:
+            assert conn.execute('SELECT reserved FROM api_budget_usage').fetchone()['reserved'] == 1
+        calls.append(request.url)
+        assert kwargs['allow_redirects'] is False
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b'{"data":{}}'
+        response._content_consumed = True
+        return response
+
+    monkeypatch.setattr(requests.Session, 'send', send)
+    with SupplierSession() as session:
+        with pytest.raises(BudgetStopped, match='shared_budget_configuration_missing'):
+            session.post(url)
+        monkeypatch.setenv('COLLECTOR_SHARED_BUDGET_DSN', 'fixture-only')
+        monkeypatch.setenv('COLLECTOR_OWNERCLAN_BUDGET_ACCOUNT', 'acct')
+        ops.execute("UPDATE api_budget_policy SET api='default'")
+        ops.commit()
+        factory = psycopg.connect
+        def connect(dsn, *args, **kwargs):
+            if dsn == 'fixture-only':
+                return db_factory()
+            return factory(dsn, *args, **kwargs)
+
+        monkeypatch.setattr(psycopg, 'connect', connect)
+        session.post(url)
+        with pytest.raises(BudgetStopped, match='exhausted:day'):
+            session.post(url)
+    assert calls == [url]
 
 
 def test_job_scope_cannot_change(ops,db_factory):

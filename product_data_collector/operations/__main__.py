@@ -39,14 +39,9 @@ def main(argv=None):
         with connect() as conn: print(json.dumps(report(conn,cfg),default=str,ensure_ascii=False))
         return 0
     if a.mode=='policy':
-        from psycopg.types.json import Jsonb
+        from .budget_policy import install_policies
         with connect() as conn:
-            for policy in cfg['budgets']:
-                conn.execute("""INSERT INTO api_budget_policy(account,api,limits,min_interval,platform_integrated)
-                    VALUES(%s,%s,%s,%s,%s) ON CONFLICT(account,api) DO UPDATE SET
-                    limits=EXCLUDED.limits,min_interval=EXCLUDED.min_interval,
-                    platform_integrated=EXCLUDED.platform_integrated""",
-                    (policy['account'],policy['api'],Jsonb(policy['limits']),policy.get('min_interval',0),policy.get('platform_integrated',False)))
+            install_policies(conn, cfg['budgets'])
         return 0
     if a.mode in ('retry','supersede'):
         if not a.job_id: p.error('retry requires --job-id')

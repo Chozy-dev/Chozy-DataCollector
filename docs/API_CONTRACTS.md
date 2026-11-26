@@ -1,19 +1,10 @@
 # 공급처 API와 정규화 계약
 
-공급처 응답의 의미와 정규화 계약을 설명한다. 호출 한도는 아래 표, 실측은 [VALIDATION](VALIDATION.md), 설정·중단·재개는 [RUNBOOK](RUNBOOK.md#공동-호출-예산)을 참고한다.
+공급처 응답의 의미와 정규화 계약을 설명한다. 기능별 호출량과 한도는 [API_USAGE](API_USAGE.md), 실측은 [VALIDATION](VALIDATION.md), 설정과 복구는 [RUNBOOK](RUNBOOK.md)을 참고한다.
 
 ## 외부 API 호출 한도
 
-| API | 확인된 기준과 미확정 범위 |
-| --- | --- |
-| 쿠팡 `products/search` | 설계서에 분당 50회로 기록돼 있다. 현재 계정에 적용되는 한도는 운영 설정 전에 확인한다. |
-| 쿠팡 `bestcategories` | 응답 최대 100개는 상품 수다. 호출 속도와 상품 검색과의 계정 공유 한도는 미확정이다. |
-| 네이버 검색광고 `RelKwdStat` | 일일 호출량 상한 없이 속도를 제한한다. 연관 키워드는 고객 ID와 IP를 함께 고려하며 속도는 변동된다. [공식 FAQ](https://github.com/naver/searchad-apidoc/wiki/FAQ) |
-| NAVER API HUB 검색어 트렌드·쇼핑인사이트 | 공식 가이드는 API별 월 50,000건과 키당 최대 초당 50회를 안내한다. 월 호출량은 API별로 집계하며 같은 키의 여러 서비스 사용량은 합산한다. [공식 가이드](https://guide.ncloud-docs.com/docs/en/apihub-overview#call-limits) |
-| 네이버 개발자센터 데이터랩 검색어 트렌드 | 기존 개발자센터 경로는 하루 1,000회다. API HUB는 위 기준을 적용한다. [공식 명세](https://developers.naver.com/docs/serviceapi/datalab/search/search.md) |
-| 오너클랜·도매매 | 오너클랜은 [공식 안내와 실측 범위](#공식-호출-제한-안내의-범위)를 참고한다. 도매매는 [Private 변경 검색](#private-변경-검색)의 성공 응답과 호출 한도가 미확정이다. |
-
-기획 당시의 한도와 우선순위는 [Collector 설계서 §7.2](references/Chozy_DataCollector_설계서_실측반영_20261119.md#72-기획서에-적힌-한도와-유의사항)에 있다. 실제 공동 예산은 배포 계정의 사용량과 정책을 확인해 정한다. Spring 개발용 상한은 [서버 검증 설정](https://github.com/Chozy-dev/Chozy-Server/blob/main/docs/BACKEND.md#실데이터-검증용-공동-호출-한도)을 참고한다.
+[공급사별 한도와 근거](API_USAGE.md#외부-api-호출-한도)를 따른다.
 
 ## 오너클랜
 
@@ -38,11 +29,7 @@ Seller GraphQL API를 사용한다. 쿼리는 [api/queries.py](../ownerclan_API/
 
 ### 공식 호출 제한 안내의 범위
 
-2026-11-21 확인한 [공식 상품 API 안내](https://www.ownerclan.com/V2/service/api-center-item.php)는 `allItems` 1회 최대 1,000개, `itemsByKeys` 최대 5,000개를 안내한다. API 센터가 연결하는 [공식 매뉴얼 ZIP](https://cdn.ownerclan.com/API%20%EB%A7%A4%EB%89%B4%EC%96%BC.zip)의 Seller PDF는 **2020-10-21 / v0.11.0**이다. PDF p.73에는 **단일 `item` 조회 설명 안에서 초당 1,000건**이라는 오래된 문구가 있으나, 이를 현재 Seller GraphQL 전체의 승인 한도로 사용하지 않는다. p.3에는 `allItems`의 `search`, `priceAsc/priceDesc`에 강화된 Quota가 적용된다고만 적혀 있다.
-
-확인한 공개 문서에서는 **현재 전체 계정에 적용되는 분·시간·일 단위 숫자, 계정/IP/token별 합산 기준, 쿼리별 비용, reset 시각, 403/429 차단 지속시간을 확정하지 못했다.** 미기재를 무제한으로 해석하지 않는다. RPM을 시간·일로 곱한 값은 설정상 산술 용량이지 제공처 쿼터가 아니다. JWT 재발급이 예산을 초기화한다고 가정하지 않는다.
-
-5,000개 안내와 달리 11월 20일 production은 1,000개 요청에 최대 100개 오류를 반환했다. 11월 21일에는 101개 요청이 HTTP 200/오류 없음/**1행 반환**이어서 같은 명시적 거절을 재현하지 못했다. 현재 서버의 정확한 hard cap을 새로 확정한 결과가 아니며, 업무 요청 상한은 기존 100개를 유지한다. HTTP 상태와 요청 개수만으로 완료를 판단하지 않는다. 최신 실측은 [VALIDATION](VALIDATION.md#오너클랜-호출-정책과-하루-1만-상품-조사), 재개 절차는 [RUNBOOK](RUNBOOK.md#오너클랜-호출-속도와-오류-후-재개)를 따른다.
+[오너클랜 공식 안내와 실측 차이](API_USAGE.md#공식-안내실측기획의-차이)와 [재개 절차](RUNBOOK.md#오너클랜-호출-속도와-오류-후-재개)를 참고한다.
 
 ## 도매꾹과 도매매
 
@@ -89,15 +76,13 @@ dateModify는 raw에 남기되 사건 발생시각으로 만들지 않는다. �
 
 HTTP 200이어도 `rCode/rMessage` 제한을 검사한다. limit=100 요청의 81개 반환을 관측했으므로 요청 limit만으로 응답 완전성을 확정하지 않는다. 동일 상품 ID가 서로 다른 순위로 반복되면 가장 높은 원본 순위의 행을 남기고 순위는 재부여하지 않는다. 순위 값 자체가 중복된 응답은 실패 처리한다. 홈 카테고리 이름은 요청 ID에 매핑한 설정값을 사용한다. 같은 날짜의 카테고리 범위는 고정하며 모든 대상의 저장·검증이 끝나야 발행한다. 전일 완료본이 없으면 순위 변화를 0으로 만들지 않는다.
 
-2026-09-02에는 검색 제한 후 best도 `rCode=403`을 반환했다는 과거 기록이 있다. 계정 예산은 두 경로를 함께 계산하며, 이 관측을 현재 계정의 고정 호출 한도로 해석하지 않는다. 당시 보고서의 수치와 원본 복구 위치는 [VALIDATION](VALIDATION.md)을 따른다.
-
 ## 네이버
 
 검색광고 RelKwdStat과 API HUB 트렌드는 별도 인증을 사용한다. [client.py](../naver_API/client.py), [services.py](../naver_API/services.py), [collector.py](../naver_API/collector.py)가 담당한다.
 
 - 월마다 검토한 서로 다른 event 코드 3개와 테마명을 설정한다. 요청 월·기준일·실제 observed_at은 서로 다른 값이다.
 - 검색수는 정수 또는 `"< 10"` 문자열이다. 공백을 정규화하고 소량값을 0이나 임의 정수로 바꾸지 않는다. PC/mobile 유효값으로 상위 10개를 선정한다.
-- 트렌드는 5그룹씩 2회 요청하며 기준일 D−56~D−1의 일간 지수에서 직전 28일 대비 최근 28일 평균 상승률을 계산한다.
+- 트렌드는 기준일 D−56~D−1의 일간 지수에서 직전 28일 대비 최근 28일 평균 상승률을 계산한다.
 - ratio는 요청 그룹·기간의 상대지수다. 절대 검색량으로 취급하거나 다른 요청의 스케일을 섞지 않는다. 누락·중복·이전 평균 0은 상태와 NULL을 남긴다.
 - 쿠팡 비교는 동일 기준일의 완료된 수집 카테고리만 대상으로 한다. 비교본 부재는 `coupang_unavailable`이며 미일치 0건과 구분한다.
 

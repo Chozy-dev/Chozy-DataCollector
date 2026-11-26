@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from product_data_collector.operations.budget import SupplierSession
 from dotenv import load_dotenv
 
 
@@ -47,7 +48,7 @@ def main() -> int:
         print("Missing required env: DOMEGGOOK API key, DOMEGGOOK_ID, DOMEGGOOK_PASSWORD")
         return 2
 
-    session = requests.Session()
+    session = SupplierSession()
     login = login_with_first_working_key(session, api_keys, member_id, password, out_dir)
     if not login["sid"]:
         print("login=failed")

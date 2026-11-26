@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 import requests
+from product_data_collector.operations.budget import SupplierSession
 
 from product_data_collector.common.collector_metrics import ApiMetrics
 from ..api.auth import JwtProvider
@@ -70,7 +71,7 @@ class OwnerclanClient:
         self._timeout = timeout_seconds
         self._max_retries = max_retries
         self._retry_after_max = retry_after_max_seconds
-        self._session = session or requests.Session()
+        self._session = session or SupplierSession()
         self._metrics = ApiMetrics("ownerclan", LOGGER)
 
     def graphql(self, query: str) -> dict[str, Any]:

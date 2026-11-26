@@ -155,6 +155,7 @@ def report():
 
 def execute():
     import requests
+    from product_data_collector.operations.budget import SupplierSession
     from ownerclan_API.api.auth import JwtProvider
     from ownerclan_API.api.client import OwnerclanClient, OwnerclanApiError, OwnerclanGraphQLError
     from ownerclan_API.api.rate_limiter import RateLimiter
@@ -176,7 +177,7 @@ def execute():
         if prior_seconds+time.monotonic()-started > 1740 or len(calls) >= 2800:
             raise Stop('budget')
 
-    class Session(requests.Session):
+    class Session(SupplierSession):
         def request(self, method, url, **kwargs):
             guard()
             pace.wait()

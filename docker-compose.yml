@@ -1,3 +1,11 @@
+x-shared-budget-environment: &shared-budget-environment
+  COLLECTOR_REQUIRE_SHARED_BUDGET: "true"
+  COLLECTOR_SHARED_BUDGET_DSN: ${REVIEWED_COLLECTOR_DSN:-}
+  COLLECTOR_COUPANG_BUDGET_ACCOUNT: ${COLLECTOR_COUPANG_BUDGET_ACCOUNT:-}
+  COLLECTOR_NAVER_BUDGET_ACCOUNT: ${COLLECTOR_NAVER_BUDGET_ACCOUNT:-}
+  COLLECTOR_OWNERCLAN_BUDGET_ACCOUNT: ${COLLECTOR_OWNERCLAN_BUDGET_ACCOUNT:-}
+  COLLECTOR_DOMEGGOOK_BUDGET_ACCOUNT: ${COLLECTOR_DOMEGGOOK_BUDGET_ACCOUNT:-}
+
 services:
   postgres:
     image: postgres:16
@@ -26,6 +34,7 @@ services:
     env_file:
       - .env
     environment:
+      <<: *shared-budget-environment
       POSTGRES_ENABLED: "true"
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
@@ -58,6 +67,7 @@ services:
     image: chozy-collector-operations:local
     working_dir: /app
     environment:
+      <<: *shared-budget-environment
       # Passed explicitly by the operator; never assembled from production .env.
       REVIEWED_COLLECTOR_DSN: ${REVIEWED_COLLECTOR_DSN:-}
       OWNERCLAN_USERNAME: ${OWNERCLAN_USERNAME:-}

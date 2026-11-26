@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from datetime import datetime, timezone
 from psycopg.types.json import Jsonb
-from .budget import BudgetSession
+from .budget import BudgetSession, shared_budget_required
 from .fence import scoring_boundary,certify_collection,source_collection_boundary
 
 
@@ -13,10 +13,12 @@ def handlers(config,connect,stop=lambda:False):
     root=Path(__file__).resolve().parents[2]
     settings=config['sources']
 
-    def wrap(client,source,attr='_session',api='default',routes=None):
+    shared_required = shared_budget_required() or config.get('require_platform_budget', True)
+
+    def wrap(client,source,attr='_session',api='default',routes=None,parents=None):
         spec=settings[source]
         setattr(client,attr,BudgetSession(getattr(client,attr),connect,spec['account'],api,
-            shared_required=config.get('require_platform_budget',True),routes=routes))
+            shared_required=shared_required,routes=routes,parents=parents))
         return client
 
     def collect(source,mode='daily'):
@@ -54,7 +56,7 @@ def handlers(config,connect,stop=lambda:False):
             # Authentication HTTP uses the same account contract.
             if hasattr(client._jwt_provider,'_session'):
                 client._jwt_provider._session=BudgetSession(client._jwt_provider._session,connect,
-                    spec['account'],'auth',shared_required=config.get('require_platform_budget',True))
+                    spec['account'],'auth',shared_required=shared_required)
             result=(collect_history(root,cfg,client=client,connection=conn) if mode=='daily' else
                     bootstrap(root,cfg,client=client,mode=mode))
             if result.get('status')!='completed': return result
@@ -100,13 +102,15 @@ def handlers(config,connect,stop=lambda:False):
                 from coupang_API.api.rate_limiter import RateLimiter
                 from coupang_API.workflows.best import collect_best
                 cfg=load_best_config(Path(settings[source]['config']))
-                client=wrap(CoupangPartnersClient(*load_credentials(root),rate_limiter=RateLimiter(cfg.requests_per_minute,60)),source)
+                client=wrap(CoupangPartnersClient(*load_credentials(root),rate_limiter=RateLimiter(cfg.requests_per_minute,60)),
+                    source,api='best',parents={'best':'default'})
                 return collect_best(conn,client,cfg,day)
             from naver_API.config import load_config
             from naver_API.client import NaverClient
             from naver_API.collector import collect_season
             cfg=load_config(Path(settings[source]['config']),day)
-            client=wrap(NaverClient.from_env(cfg),source,'session','ad',{'search-trend':'trend'})
+            client=wrap(NaverClient.from_env(cfg),source,'session','ad',{'search-trend':'trend'},
+                parents={'trend':'hub'} if shared_required else None)
             return collect_season(conn,client,cfg,day)
         return execute
 

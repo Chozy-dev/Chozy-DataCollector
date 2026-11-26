@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 import requests
+from product_data_collector.operations.budget import SupplierSession
 
 from product_data_collector.common.collector_metrics import ApiMetrics
 from ..config import DomeggookConfig
@@ -87,7 +88,7 @@ class DomeggookClient:
         self._credential_lock = Lock()
         self._timeout = timeout_seconds
         self._max_retries = max_retries
-        self._session = session or requests.Session()
+        self._session = session or SupplierSession()
         self._metrics = ApiMetrics("domeggook", LOGGER)
         self.request_budget = request_budget
 

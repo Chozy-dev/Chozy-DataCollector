@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from product_data_collector.operations.budget import SupplierSession
 from dotenv import load_dotenv
 
 
@@ -73,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     events_path = out_dir / f"{run_id}.jsonl"
     summary_path = out_dir / f"{run_id}_summary.json"
 
-    session = requests.Session()
+    session = SupplierSession()
     api_label, api_key = choose_api_key()
     member_id = env_first("DOMEGGOOK_ID", "DOMEGGOOK_MEMBER_ID")
     password = env_first("DOMEGGOOK_PASSWORD", "DOMEGGOOK_PW")
@@ -339,7 +340,7 @@ def call_get_item_view_es_threaded(
 def get_thread_session() -> requests.Session:
     session = getattr(THREAD_LOCAL, "session", None)
     if session is None:
-        session = requests.Session()
+        session = SupplierSession()
         THREAD_LOCAL.session = session
     return session
 

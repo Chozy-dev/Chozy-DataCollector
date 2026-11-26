@@ -5,6 +5,7 @@ import hmac
 import os
 import time
 import requests
+from product_data_collector.operations.budget import SupplierSession
 from product_data_collector.common.rate_limiter import IntervalRateLimiter
 
 
@@ -20,7 +21,7 @@ class NaverClient:
     def __init__(self, ad_key, ad_secret, customer, hub_id, hub_key, config, session=None):
         self.ad_key, self.ad_secret, self.customer = ad_key, ad_secret, customer
         self.hub_id, self.hub_key = hub_id, hub_key
-        self.session = session or requests.Session()
+        self.session = session or SupplierSession()
         self.ad_limiter = IntervalRateLimiter(config.ad_interval_seconds)
         self.trend_limiter = IntervalRateLimiter(config.trend_interval_seconds)
 

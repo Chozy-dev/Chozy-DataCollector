@@ -46,6 +46,8 @@ from .scoring_invalidation_schema import DDL as SCORING_INVALIDATION_DDL
 MIGRATIONS["stage10_scoring_performance"] = SCORING_INVALIDATION_DDL
 from .access import BUDGET_GUARD_DDL
 MIGRATIONS["runtime_budget_guard"] = BUDGET_GUARD_DDL
+from .shared_budget_schema import DDL as SHARED_BUDGET_DDL
+MIGRATIONS["shared_api_budget"] = SHARED_BUDGET_DDL
 
 
 def apply_migration(connection, name):

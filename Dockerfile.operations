@@ -7,7 +7,7 @@ COPY domeggook_API domeggook_API
 COPY ownerclan_API ownerclan_API
 COPY coupang_API coupang_API
 COPY naver_API naver_API
-ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 COLLECTOR_REQUIRE_SHARED_BUDGET=true
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["python", "-m", "product_data_collector.operations"]
 CMD ["plan", "--config", "product_data_collector/operations/example.yaml"]

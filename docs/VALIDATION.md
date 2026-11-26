@@ -4,6 +4,8 @@
 
 ## 현재 검증 결과
 
+- 2026-11-27 공동 예산 브랜치에서 오프라인 단위 회귀 **579 passed**, 격리 Docker PostgreSQL 16의 통합 운영 검증 **30 passed**. 시간 한도, 쿠팡 리포트 몫과 본문 403의 공동 차단, HUB 동시 예약, 기존 기록·함수 권한 보존, 독립 경로의 HTTP 전 예약을 확인했다. [회귀 실행 방법](#회귀-실행-방법)
+
 2026-11-26 PostgreSQL 저장 모듈 분리 후 오프라인 단위 회귀 **579 passed**(12.51초), 격리 WSL의 Python 3.12·PostgreSQL 16.15 통합 회귀 **252 passed**(71.36초)다. 기존 상품 저장·이력, 재개·발행 및 쿠팡 완료 발행본 내보내기를 검증했다. 통합 실행과 migration의 오프라인 계획도 확인했다. 최신 JUnit은 `artifacts/validation/unit.xml`, `integration.xml`이다. [회귀 실행 방법](#회귀-실행-방법)
 
 ## 오너클랜 5000개 표본 E2E
@@ -94,7 +96,7 @@ python -m pytest tests/integration -q
 
 과거 상세 1만 개 표본은 최초 100회에 9,772개, 보완 포함 **9,997개**를 확보했다. 기록된 처리 시간 합계는 453.005초이며 연속 실행의 완료 시간이 아니다. `allItems(first:1)`의 과거 180 RPM 1시간 실측은 10,571시도·10,520성공·51오류였고, 200 RPM 시험에서는 885번째에 제한이 관측됐다. 다른 시점과 쿼리의 결과라 현재 묶음 worker의 계정 한도·리셋이나 처리 시간에 적용할 수 없다.
 
-호출 수는 `ceil(이벤트 수/1000) + ceil(고유 상세 대상/100) + 보완·재시도 + 인증·발견`이다. 고정 1만 key의 상세 최소 100회, 10만 key는 1,000회다. 실제 지연·페이싱과 저장은 별도 계측한다. 제공처 안내는 [API_CONTRACTS](API_CONTRACTS.md#공식-호출-제한-안내의-범위), 운영 속도와 오류별 재개는 [RUNBOOK](RUNBOOK.md#오너클랜-호출-속도와-오류-후-재개), 원시 집계는 [근거 색인](#근거-색인과-복구-위치)을 참고한다.
+호출 수 산정은 [Collector 배치당 호출량](API_USAGE.md#collector-배치당-호출량), 운영 속도와 오류별 재개는 [RUNBOOK](RUNBOOK.md#오너클랜-호출-속도와-오류-후-재개), 원시 집계는 [근거 색인](#근거-색인과-복구-위치)을 참고한다.
 
 ## 도매매 Private 동기화 재호출
 
@@ -114,11 +116,11 @@ python -m pytest tests/integration -q
 
 복구점은 `C:/dev/Chozy/backups/migration-preflight-20261122/`의 custom dump·data/config/.env ZIP·비밀번호 제외 역할 정의·SHA manifest다. 격리 DB 복원 후 기존 사본과 스키마·인덱스·전체 행 해시가 일치했다. `--no-owner --no-acl`을 사용했으므로 역할/ACL·로그인 비밀번호·PITR을 별도 검증한다. 감사 시점의 상태는 적용 직전에 다시 확인한다.
 
-근거는 `artifacts/validation/{migration-preflight,migration-backup-restore}.json`, 검토 SQL은 `migration-preflight-plan.sql`, 실행 순서는 [RUNBOOK](RUNBOOK.md#운영-전환-준비와-적용-순서)에 있다.
+근거는 `artifacts/validation/{migration-preflight,migration-backup-restore}.json`, 검토 SQL은 `migration-preflight-plan.sql`, 실행 순서는 [운영 전환](DEPLOYMENT.md#운영-전환-준비와-적용-순서)에 있다.
 
 ### DB 권한 분리 검증
 
-2026-11-22 외부 `migration-preflight-20261122/collector.dump`를 새 PostgreSQL16·CPU2/RAM2GiB·localhost55450/collector_operations_copy에 `--no-owner --no-acl`로 복원했다. 운영에는 접속/변경하지 않고 사본에 기존 네 migration과 새 `runtime_budget_guard`, 최소 권한 계획을 적용했다. 구조/정책은 [DATABASE](DATABASE.md#실행-계정과-권한-분리), 배포/복구는 [RUNBOOK](RUNBOOK.md#권한-분리-사본-검증과-배포)가 기준이다.
+2026-11-22 외부 `migration-preflight-20261122/collector.dump`를 새 PostgreSQL16·CPU2/RAM2GiB·localhost55450/collector_operations_copy에 `--no-owner --no-acl`로 복원했다. 운영에는 접속/변경하지 않고 사본에 기존 네 migration과 새 `runtime_budget_guard`, 최소 권한 계획을 적용했다. 구조/정책은 [DATABASE](DATABASE.md#실행-계정과-권한-분리), 배포/복구는 [운영 전환](DEPLOYMENT.md#권한-분리-사본-검증과-배포)가 기준이다.
 
 관리자와 다른 실제 비소유자 LOGIN 두 개에 각각 Collector/Spring NOLOGIN 역할만 부여해 검증했다. 복원 사본과 별도 작은 fixture에서 각24건(총48건)의 금지 작업을 확인했다: DDL/테이블 삭제/TRUNCATE/트리거 해제/role 생성/sequence setval/ledger 변경/예산 직접 수정, Spring의 원본 상품·발행 행 직접 접근, Collector의 완료 추천 행 수정·인증 근거 변경은 권한 오류로 거부됐다. 실제 Runner로 수집→상세→initial 발행→미반환 시 이전 완료본 유지→재개→새 job incremental을 통과했고 Spring 함수 조회가 같은 완료 배치와 일치했다. source HTTP는 fixture이며 외부API0회다.
 

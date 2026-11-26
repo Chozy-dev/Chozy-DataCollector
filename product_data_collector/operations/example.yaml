@@ -20,4 +20,4 @@ sources:
   ownerclan: {config: ownerclan_API/config/config.yaml, account: reviewed-owner-account}
   coupang: {config: coupang_API/config/best.example.yaml, account: reviewed-coupang-account}
   naver: {config: naver_API/season.example.yaml, account: reviewed-naver-account}
-budgets: [] # {account, api, limits: {second/minute/day/month: positive_integer}, min_interval, platform_integrated: false}
+budgets: [] # {account, api, limits: {second/minute/hour/day/month: positive_integer}, min_interval, platform_integrated, shared_api}
