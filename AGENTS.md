@@ -4,6 +4,8 @@
 
 `README.md`와 `docs/CONTEXT.md`를 읽고 작업 범위에 해당하는 문서만 추가로 읽는다. 현재 진척·다음 작업은 CONTEXT가 기준이며, `artifacts/`의 과거 기록을 현재 구현 상태로 간주하지 않는다.
 
+외부 API의 호출 한도와 원본 근거는 [API_CONTRACTS](docs/API_CONTRACTS.md#외부-api-호출-한도)에서 확인한다. 최종 실측의 조건·한계와 근거 위치는 [VALIDATION](docs/VALIDATION.md)에 둔다.
+
 ## 구조와 변경 범위
 
 - 공급처 패키지와 `python -m ...` 진입점은 유지한다.
