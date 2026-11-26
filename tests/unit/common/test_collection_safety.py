@@ -3,8 +3,6 @@ from dataclasses import replace
 
 import pytest
 
-from coupang_API.workflows import collector as coupang
-from tests.unit.coupang.test_collector_bulk import FakeClient as CoupangClient
 from domeggook_API.workflows import collect_product_details as dome
 from domeggook_API.workflows import discover_products as discovery
 from tests.unit.domeggook.test_discover_collect import FakeClient as DomeClient, _config as dome_config
@@ -13,7 +11,7 @@ from ownerclan_API.workflows import sync_incremental as incremental
 from tests.unit.ownerclan.test_ownerclan_workflow import _config as owner_config, _item, _category
 from ownerclan_API.persistence.storage import atomic_write_json, load_state
 from product_data_collector.persistence.postgres_storage import ProductSaveError
-from scripts.run_daily_collector import _exit_code, _status, _reason
+from scripts.run_daily_collector import _status, _reason
 
 
 def page(keys, *, more=False, cursor=None):
@@ -210,62 +208,6 @@ def test_history_cursor_repetition_does_not_mark_range_complete(tmp_path, owner_
     assert "lastSuccessfulItemSyncAt" not in load_state(config.output.state_dir / "legacy-all-items-state.json")
 
 
-@pytest.fixture
-def coupang_setup(tmp_path, monkeypatch):
-    path = tmp_path / "coupang_API" / "config" / "keywords.txt"
-    path.parent.mkdir(parents=True)
-    path.write_text("first\nsecond\n", encoding="utf-8")
-    CoupangClient.calls = []
-    CoupangClient.failing_keywords = set()
-    monkeypatch.setattr(coupang, "CoupangPartnersClient", CoupangClient)
-    monkeypatch.setattr(coupang, "load_credentials", lambda _: ("test", "test"))
-    saver = Saver()
-    monkeypatch.setattr(coupang, "save_products_with_raw_samples_if_enabled", saver.save)
-    return tmp_path / "coupang_API/data/state/product_search_checkpoint.json", saver
-
-
-def test_coupang_db_failure_keeps_keyword_pending(tmp_path, monkeypatch, coupang_setup):
-    path, saver = coupang_setup
-    calls = []
-
-    def save(**kwargs):
-        calls.append(kwargs)
-        state = load_state(path)
-        assert not state["completedKeywords"] if len(calls) == 1 else state["completedKeywords"] == ["first"]
-        if len(calls) == 2:
-            raise ProductSaveError("coupang", [], ["100"])
-        return saver.save(**kwargs)
-
-    monkeypatch.setattr(coupang, "save_products_with_raw_samples_if_enabled", save)
-    assert coupang.collect_once(tmp_path, coupang.CollectorConfig()) == 1
-    assert load_state(path)["completedKeywords"] == ["first"]
-    monkeypatch.setattr(coupang, "save_products_with_raw_samples_if_enabled", saver.save)
-    CoupangClient.calls = []
-    assert coupang.collect_once(tmp_path, coupang.CollectorConfig()) == 0
-    assert [call.keyword for call in CoupangClient.calls] == ["second"]
-    assert not path.exists()
-    assert len(saver.committed) == 1
-
-
-def test_coupang_checkpoint_failure_never_clears_pending_keywords(tmp_path, monkeypatch, coupang_setup):
-    path, saver = coupang_setup
-    real_save = coupang.Checkpoint.save
-
-    def fail_after_commit(checkpoint):
-        if checkpoint.completed_keywords:
-            assert saver.committed
-            raise OSError("checkpoint failure")
-        real_save(checkpoint)
-
-    monkeypatch.setattr(coupang.Checkpoint, "save", fail_after_commit)
-    assert coupang.collect_once(tmp_path, coupang.CollectorConfig()) == 1
-    assert load_state(path)["completedKeywords"] == []
-    monkeypatch.setattr(coupang.Checkpoint, "save", real_save)
-    assert coupang.collect_once(tmp_path, coupang.CollectorConfig()) == 0
-    assert len(saver.committed) == 1
-    assert len(set(saver.calls)) == 1
-
-
 def test_dome_detail_partial_db_failure_replays_unconfirmed_batch(tmp_path, monkeypatch):
     saver = Saver()
     config = replace(dome_config(), details=replace(dome_config().details, batch_size=2))
@@ -316,7 +258,7 @@ def test_discovery_empty_page_flushes_buffer_before_state_moves(tmp_path, monkey
     assert state.get("nextPage", 1) == 1
 
 
-@pytest.mark.parametrize("platform", ["ownerclan", "domeggook", "coupang"])
+@pytest.mark.parametrize("platform", ["ownerclan", "domeggook"])
 def test_daily_status_only_completes_successful_range(platform):
     assert _status(platform, {}, 1) == "failed"
     paused = {"stage": {"status": "paused", "reason": "item_limit_reached"}}
@@ -337,9 +279,3 @@ def test_disabled_discovery_db_does_not_advance_checkpoint(tmp_path, monkeypatch
         discovery.discover(tmp_path, dome_config(), client=DomeClient())
     state = load_state(tmp_path / "domeggook_API/data/state/discovery-state.json")
     assert state["nextPage"] == 1
-
-
-@pytest.mark.parametrize("payload", [{}, {"data": {}}, {"data": {"productData": [None]}}, {"data": {"productData": [{}]}}])
-def test_coupang_malformed_response_is_not_empty_success(payload):
-    with pytest.raises(ValueError):
-        coupang.parse_product_records(payload, requested_keyword="test", collected_at="2026-01-01T00:00:00Z")

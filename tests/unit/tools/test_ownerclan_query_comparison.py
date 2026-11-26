@@ -4,7 +4,7 @@ import requests
 from scripts.probes import ownerclan_query_comparison as probe
 
 
-def test_plan_does_not_open_network_or_load_credentials(monkeypatch):
+def test_plan_does_not_open_network_or_load_credentials(monkeypatch, ownerclan_comparison_plan):
     def forbidden(*args, **kwargs):
         pytest.fail("offline plan accessed credentials/network")
     monkeypatch.setattr(probe, "load_credentials", forbidden)
@@ -49,7 +49,7 @@ def test_auth_retry_is_blocked_before_transport(monkeypatch):
     assert calls[0][1]["allow_redirects"] is False
 
 
-def test_coverage_plan_has_38_reads_without_network(monkeypatch,capsys):
+def test_coverage_plan_has_38_reads_without_network(monkeypatch, capsys, ownerclan_comparison_plan):
     monkeypatch.setattr(probe,"load_credentials",lambda *a: pytest.fail("credentials accessed"))
     monkeypatch.setattr(probe,"MeasuredSession",lambda *a: pytest.fail("network opened"))
     assert probe.main(["--mode","coverage"]) == 0

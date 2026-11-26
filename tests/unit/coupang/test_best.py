@@ -7,7 +7,6 @@ from coupang_API.api.client import (BestCategoryRequest, CoupangPartnersClient,
     CoupangApiError, CoupangHttpError, CoupangResponseError, build_best_uri)
 from coupang_API.config.best import BestConfig, load_best_config
 from coupang_API.services.best import parse_best_records, rank_movement
-from coupang_API.workflows.best import main
 
 
 def product(pid=5000000001, rank=7):
@@ -48,12 +47,20 @@ def test_best_malformed_product(field,value):
         parse_best_records(payload(p),1)
 
 
-def test_best_duplicate_id_or_rank_and_over_limit():
+def test_best_duplicate_rank_and_over_limit():
     for p in (payload(product(),product()),payload(product(1,1),product(2,1))):
         with pytest.raises(ValueError):
             parse_best_records(p,1)
     with pytest.raises(ValueError):
         parse_best_records(payload(product(1,1),product(2,2)),1,1)
+
+
+def test_best_repeated_product_keeps_original_highest_rank():
+    highest = {**product(1, 2), "productPrice": 5000}
+    rows = parse_best_records(payload(product(1, 7), product(2, 3), highest, product(1, 10)), 1013)
+    assert [(row["product_id"], row["rank"]) for row in rows] == [(1, 2), (2, 3)]
+    assert rows[0]["raw"] == highest
+    assert rows[0]["price"] == Decimal(5000)
 
 
 @pytest.mark.parametrize('rank,previous,available,expected',[
@@ -98,19 +105,12 @@ def test_best_uri_and_configuration(tmp_path):
     p.write_text('categories: [{id: 1010, name: fixture}]\nmax_calls: 2\nrequests_per_minute: 1',encoding='utf8')
     assert load_best_config(p).categories == ((1010,'fixture'),)
     # Default is an offline plan and never loads credentials or opens PostgreSQL.
-    assert main(['--config',str(p),'--dsn-env','NONEXISTENT_DSN']) == 0
-
-
-def test_default_cli_is_best_and_search_remains_explicit(monkeypatch):
     from coupang_API.__main__ import main as entry
-    best, search = Mock(return_value=0), Mock(return_value=0)
-    monkeypatch.setattr('coupang_API.workflows.best.main',best)
-    monkeypatch.setattr('coupang_API.workflows.collector.main',search)
-    entry(['--config','best.yaml'])
-    best.assert_called_once_with(['--config','best.yaml'])
-    search.assert_not_called()
-    entry(['--mode','legacy-search','--dry-run'])
-    search.assert_called_once_with(['--dry-run'])
+
+    assert entry(['--config',str(p),'--dsn-env','NONEXISTENT_DSN']) == 0
+    with pytest.raises(SystemExit) as error:
+        entry(['--mode', 'legacy-search', '--config', str(p), '--dsn-env', 'NONEXISTENT_DSN'])
+    assert error.value.code == 2
 
 
 def test_best_success_uses_existing_auth_and_explicit_budget_limiter():

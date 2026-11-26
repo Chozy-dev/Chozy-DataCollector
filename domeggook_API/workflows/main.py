@@ -122,7 +122,7 @@ def run(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run Domeggook/Domeme discovery and daily detail snapshot collection.")
     parser.add_argument("--config", default=None)
-    parser.add_argument("--limit", type=int, default=None, help="Limit keywords and active product ids for a small real API run.")
+    parser.add_argument("--limit", type=int, default=None, help="Limit categories and active product IDs for a small real API run.")
     parser.add_argument("--page-limit", type=int, default=None, help="Limit discovery pages for a small real API run.")
     parser.add_argument("--max-runtime-hours", type=float, default=None, help="Stop cleanly after this many hours and resume next run.")
     parser.add_argument("--max-api-calls", type=int, default=None, help="Stop cleanly after this many Domeggook API calls in this run.")

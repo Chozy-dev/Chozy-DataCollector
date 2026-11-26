@@ -27,10 +27,6 @@ class DiscoveryConfig:
     sorts: dict[str, str]
     list_page_size: int
 
-    @property
-    def items_per_keyword(self) -> int:
-        return self.list_page_size
-
 
 @dataclass(frozen=True)
 class DetailsConfig:
@@ -132,24 +128,6 @@ def load_config(path: Path) -> DomeggookConfig:
         ),
         timezone=str(payload.get("timezone") or "Asia/Seoul"),
     )
-
-
-def load_keywords(path: Path) -> list[str]:
-    if not path.exists():
-        raise FileNotFoundError(f"keywords file not found: {path}")
-
-    seen: set[str] = set()
-    keywords: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        keyword = line.strip()
-        if not keyword or keyword.startswith("#") or keyword in seen:
-            continue
-        seen.add(keyword)
-        keywords.append(keyword)
-
-    if not keywords:
-        raise ValueError("keywords.txt must contain at least one keyword")
-    return keywords
 
 
 def load_api_keys(project_root: Path) -> list[str]:

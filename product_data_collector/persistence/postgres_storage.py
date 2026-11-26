@@ -3,43 +3,47 @@ from __future__ import annotations
 import logging
 import os
 import hashlib
-from threading import Lock
 from collections.abc import Iterable
-from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterator
 
-import psycopg
 from dotenv import load_dotenv
 from psycopg import Connection
-from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from product_data_collector.common.numeric_utils import parse_decimal
 from product_data_collector.domain.product_history import (
     canonicalize,
     changed_leaf_paths,
-    comparable_state,
     external_product_id,
     flatten_paths,
-    normalize_current_product,
 )
-from product_data_collector.domain.shipping_fees import parse_shipping_fee
 from product_data_collector.domain.current_state import CURRENT_COLUMNS, project_current
+from .discovery_storage import (
+    _bulk_upsert_discovery_targets,
+    _bulk_upsert_search_ranks,
+    _count_new_discovery_targets,
+    _discovery_target_rows,
+    _search_rank_rows,
+)
+from .postgres_connection import (
+    PostgresConfig,
+    connect as connect,
+    ensure_schema_initialized,
+    init_schema as init_schema,
+    load_postgres_config as load_postgres_config,
+    open_connection,
+    postgres_enabled as postgres_enabled,
+    test_connection as test_connection,
+)
 from .product_storage_schema import uses_current_storage
+from .snapshot_payload import _has_inventory_snapshot, _has_shipping_snapshot, snapshot_row as _snapshot_row
+from .storage_values import json_safe as _json_safe, parse_datetime
 
 
-TRUE_VALUES = {"1", "true", "yes", "y", "on"}
-DOMEGGOOK_RANKED_SORTS = {"ha", "rd"}
 DEFAULT_PRODUCT_BATCH_SIZE = 1000
 PRODUCT_BATCH_SIZE_ENV = "POSTGRES_PRODUCT_BATCH_SIZE"
 MAX_RAW_SAMPLE_RETENTION = 100
 LOGGER = logging.getLogger(__name__)
-_SCHEMA_INIT_LOCK = Lock()
-_SCHEMA_INIT_KEYS: set[tuple[str, int, str, str, bool]] = set()
 
 
 class ProductSaveError(RuntimeError):
@@ -87,74 +91,6 @@ def _save_product_batches(connection, rows, batch_size, *, raw_sample_count=0):
             ) from exc
         committed_ids.extend(row["external_product_id"] for row in batch)
     return len(committed_ids)
-
-@dataclass(frozen=True)
-class PostgresConfig:
-    host: str
-    port: int
-    database: str
-    user: str
-    password: str
-
-
-def load_postgres_config(project_root: Path | None = None) -> PostgresConfig:
-    if project_root is not None:
-        load_dotenv(project_root / ".env", override=False)
-    else:
-        load_dotenv(override=False)
-
-    values = {
-        "POSTGRES_HOST": os.getenv("POSTGRES_HOST"),
-        "POSTGRES_PORT": os.getenv("POSTGRES_PORT"),
-        "POSTGRES_DB": os.getenv("POSTGRES_DB"),
-        "POSTGRES_USER": os.getenv("POSTGRES_USER"),
-        "POSTGRES_PASSWORD": os.getenv("POSTGRES_PASSWORD"),
-    }
-    missing = [name for name, value in values.items() if not value]
-    if missing:
-        raise RuntimeError(f"missing required PostgreSQL environment variables: {', '.join(missing)}")
-
-    return PostgresConfig(
-        host=str(values["POSTGRES_HOST"]),
-        port=int(str(values["POSTGRES_PORT"])),
-        database=str(values["POSTGRES_DB"]),
-        user=str(values["POSTGRES_USER"]),
-        password=str(values["POSTGRES_PASSWORD"]),
-    )
-
-
-def postgres_enabled(project_root: Path | None = None) -> bool:
-    if project_root is not None:
-        load_dotenv(project_root / ".env", override=False)
-    else:
-        load_dotenv(override=False)
-    return str(os.getenv("POSTGRES_ENABLED", "")).strip().lower() in TRUE_VALUES
-
-
-@contextmanager
-def connect(config: PostgresConfig) -> Iterator[Connection[Any]]:
-    connection = psycopg.connect(
-        host=config.host,
-        port=config.port,
-        dbname=config.database,
-        user=config.user,
-        password=config.password,
-        connect_timeout=10,
-        row_factory=dict_row,
-    )
-    try:
-        yield connection
-    finally:
-        connection.close()
-
-
-def test_connection(project_root: Path | None = None) -> dict[str, str]:
-    config = load_postgres_config(project_root)
-    with connect(config) as connection:
-        row = connection.execute(
-            "SELECT current_database() AS database, version() AS version"
-        ).fetchone() or {}
-    return {"database": str(row.get("database") or ""), "version": str(row.get("version") or "")}
 
 
 def product_counts(project_root: Path | None = None) -> dict[str, int]:
@@ -223,47 +159,6 @@ def save_discovered_product_ids_if_enabled(
     return inserted_count
 
 
-def init_schema(connection: Connection[Any]) -> None:
-    """Create an empty schema or validate an existing one; never repair it implicitly."""
-    from .schema import CREATE_TABLES, CREATE_INDEXES, validate_schema
-    if not uses_current_storage():
-        from .schema import BASE_CREATE_TABLES as CREATE_TABLES, BASE_CREATE_INDEXES as CREATE_INDEXES
-
-    try:
-        # Serialize first-time creation across collector processes.
-        connection.execute("SELECT pg_advisory_xact_lock(724639118504)")
-        existing = connection.execute("SELECT to_regclass('products') AS existing").fetchone()
-        if existing and existing["existing"]:
-            # Runtime credentials cannot run DDL on administrator-owned objects.
-            # Existing schemas are validated; repairs remain explicit migrations.
-            validate_schema(connection)
-            if uses_current_storage():
-                from .product_storage_schema import validate_product_storage
-                validate_product_storage(connection, indexes=True)
-            connection.commit()
-            return
-        for statement in CREATE_TABLES:
-            connection.execute(statement)
-        validate_schema(connection)
-        for statement in CREATE_INDEXES:
-            connection.execute(statement)
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
-
-
-def ensure_schema_initialized(config: PostgresConfig, connection: Connection[Any]) -> None:
-    key = (config.host, config.port, config.database, config.user, uses_current_storage())
-    if key in _SCHEMA_INIT_KEYS:
-        return
-    with _SCHEMA_INIT_LOCK:
-        if key in _SCHEMA_INIT_KEYS:
-            return
-        init_schema(connection)
-        _SCHEMA_INIT_KEYS.add(key)
-
-
 def save_product_snapshots(
     *,
     project_root: Path,
@@ -281,7 +176,6 @@ def save_product_snapshots(
     with connect(config) as connection:
         ensure_schema_initialized(config, connection)
         return _save_product_batches(connection, rows, batch_size)
-
 
 
 def save_products_with_raw_samples_if_enabled(
@@ -375,15 +269,7 @@ class ProductSnapshotSaver:
             return self._connection
         self._config = load_postgres_config(self.project_root)
         self._batch_size = _product_batch_size(self.project_root)
-        self._connection = psycopg.connect(
-            host=self._config.host,
-            port=self._config.port,
-            dbname=self._config.database,
-            user=self._config.user,
-            password=self._config.password,
-            connect_timeout=10,
-            row_factory=dict_row,
-        )
+        self._connection = open_connection(self._config)
         try:
             ensure_schema_initialized(self._config, self._connection)
         except Exception:
@@ -415,7 +301,6 @@ def _save_products_with_raw_samples(
             raise ProductSaveError(platform, [], [row["external_product_id"] for row in snapshot_rows]) from exc
     snapshot_count = _save_product_batches(connection, snapshot_rows, batch_size, raw_sample_count=len(raw_rows))
     return {"rawSampleCount": len(raw_rows), "snapshotCount": snapshot_count}
-
 
 
 def save_product_snapshots_if_enabled(
@@ -536,176 +421,6 @@ def save_discovery_targets_and_search_ranks_if_enabled(
     }
 
 
-def _search_rank_rows(platform: str, records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for record in records:
-        product_id = record.get("productId")
-        collected_at = record.get("collectedAt")
-        sort = _text_or_none(record.get("sort") or record.get("sortBy")) or ""
-        rank = _positive_int(record.get("rank"))
-        if product_id in (None, "") or collected_at in (None, "") or rank is None:
-            continue
-        if platform == "domeggook" and sort not in DOMEGGOOK_RANKED_SORTS:
-            continue
-        rows.append(
-            {
-                "platform": platform,
-                "collected_at": _parse_datetime(str(collected_at)),
-                "keyword": _text_or_none(record.get("keyword")) or "",
-                "category_code": _text_or_none(record.get("categoryCode")) or "",
-                "category_name": _text_or_none(record.get("categoryName")),
-                "category_path": record.get("categoryPath") if isinstance(record.get("categoryPath"), list) else [],
-                "market": _text_or_none(record.get("market")) or "default",
-                "sort": sort,
-                "reason": _text_or_none(record.get("reason")),
-                "external_product_id": str(product_id),
-                "rank": rank,
-            }
-        )
-    return rows
-
-
-def _bulk_upsert_search_ranks(connection: Connection[Any], rows: list[dict[str, Any]]) -> None:
-    with connection.cursor() as cursor:
-        cursor.executemany(
-            """
-            INSERT INTO product_search_ranks (
-                platform,
-                collected_at,
-                keyword,
-                category_code,
-                category_name,
-                category_path,
-                market,
-                sort,
-                reason,
-                external_product_id,
-                rank
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (platform, collected_at, keyword, category_code, market, sort, external_product_id, rank) DO UPDATE SET
-                category_name = EXCLUDED.category_name,
-                category_path = EXCLUDED.category_path,
-                reason = EXCLUDED.reason
-            """,
-            [
-                (
-                    row["platform"],
-                    row["collected_at"],
-                    row["keyword"],
-                    row["category_code"],
-                    row["category_name"],
-                    Jsonb(_json_safe(row["category_path"])),
-                    row["market"],
-                    row["sort"],
-                    row["reason"],
-                    row["external_product_id"],
-                    row["rank"],
-                )
-                for row in rows
-            ],
-        )
-
-
-def _discovery_target_rows(platform: str, records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for record in records:
-        product_id = record.get("productId") or record.get("productKey") or record.get("externalProductId")
-        discovered_at = record.get("collectedAt") or record.get("discoveredAt")
-        if product_id in (None, "") or discovered_at in (None, ""):
-            continue
-        external_id = str(product_id)
-        if external_id in seen:
-            continue
-        seen.add(external_id)
-        rows.append(
-            {
-                "platform": platform,
-                "external_product_id": external_id,
-                "discovered_at": _parse_datetime(str(discovered_at)),
-                "keyword": _text_or_none(record.get("keyword")),
-                "category_code": _text_or_none(record.get("categoryCode")),
-                "category_name": _text_or_none(record.get("categoryName")),
-                "market": _text_or_none(record.get("market")),
-                "reason": _text_or_none(record.get("reason")),
-            }
-        )
-    return rows
-
-
-def _count_new_discovery_targets(
-    connection: Connection[Any],
-    platform: str,
-    rows: list[dict[str, Any]],
-) -> int:
-    external_ids = [row["external_product_id"] for row in rows]
-    existing = connection.execute(
-        """
-        SELECT external_product_id
-        FROM product_discovery_targets
-        WHERE platform = %s
-          AND external_product_id = ANY(%s)
-        """,
-        (platform, external_ids),
-    ).fetchall()
-    existing_ids = {str(row["external_product_id"]) for row in existing}
-    return sum(1 for external_id in external_ids if external_id not in existing_ids)
-
-
-def _bulk_upsert_discovery_targets(connection: Connection[Any], rows: list[dict[str, Any]]) -> None:
-    with connection.cursor() as cursor:
-        cursor.executemany(
-            """
-            INSERT INTO product_discovery_targets (
-                platform,
-                external_product_id,
-                first_discovered_at,
-                last_discovered_at,
-                keyword,
-                category_code,
-                category_name,
-                market,
-                reason
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (platform, external_product_id) DO UPDATE SET
-                last_discovered_at = EXCLUDED.last_discovered_at,
-                keyword = COALESCE(EXCLUDED.keyword, product_discovery_targets.keyword),
-                category_code = COALESCE(EXCLUDED.category_code, product_discovery_targets.category_code),
-                category_name = COALESCE(EXCLUDED.category_name, product_discovery_targets.category_name),
-                market = COALESCE(EXCLUDED.market, product_discovery_targets.market),
-                reason = COALESCE(EXCLUDED.reason, product_discovery_targets.reason),
-                active = true,
-                updated_at = now()
-            """,
-            [
-                (
-                    row["platform"],
-                    row["external_product_id"],
-                    row["discovered_at"],
-                    row["discovered_at"],
-                    row["keyword"],
-                    row["category_code"],
-                    row["category_name"],
-                    row["market"],
-                    row["reason"],
-                )
-                for row in rows
-            ],
-        )
-
-
-def _positive_int(value: Any) -> int | None:
-    if isinstance(value, bool) or value in (None, ""):
-        return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None
-
-
 def _product_batch_size(project_root: Path | None = None) -> int:
     if project_root is not None:
         load_dotenv(project_root / ".env", override=False)
@@ -756,7 +471,7 @@ def _raw_sample_rows(
             {
                 "platform": platform,
                 "external_product_id": external_id,
-                "collected_at": _parse_datetime(str(product.get("collectedAt") or collected_at)),
+                "collected_at": parse_datetime(str(product.get("collectedAt") or collected_at)),
                 "payload": raw,
             }
         )
@@ -1023,7 +738,6 @@ def current_params(current):
                  for c in CURRENT_COLUMNS)
 
 
-
 def _product_upsert_params(row: dict[str, Any], existing: dict[str, Any] | None) -> tuple[Any, ...]:
     seller = row["seller"]
     first_seen_at = existing.get("first_seen_at") if existing else row["collected_at"]
@@ -1085,391 +799,3 @@ def _bulk_insert_history(
             """,
             rows,
         )
-
-
-def _has_inventory_snapshot(row: dict[str, Any]) -> bool:
-    if row["stock_quantity"] is not None:
-        return True
-    return _has_meaningful_payload_value(row["inventory_payload"], ignored_keys={"stockQuantitySource"})
-
-
-def _has_shipping_snapshot(shipping: dict[str, Any], row: dict[str, Any]) -> bool:
-    if shipping["fee"] is not None or row["is_free_shipping"] is not None:
-        return True
-    if shipping["shipping_type"] not in (None, "", "unknown"):
-        return True
-    payload = shipping.get("payload", row["shipping_payload"])
-    return _has_meaningful_payload_value(
-        payload,
-        ignored_keys={
-            "market",
-            "shipping_fee",
-            "shipping_type",
-            "shipping_payment",
-            "shipping_fee_raw",
-            "shipping_fee_type_raw",
-            "requires_quantity_calculation",
-            "sourceFields",
-            "source_fields",
-        },
-    )
-
-
-def _has_meaningful_payload_value(value: Any, *, ignored_keys: set[str] | None = None) -> bool:
-    ignored = ignored_keys or set()
-    if isinstance(value, dict):
-        return any(
-            _has_meaningful_payload_value(child, ignored_keys=ignored)
-            for key, child in value.items()
-            if str(key) not in ignored
-        )
-    if isinstance(value, list):
-        return any(_has_meaningful_payload_value(child, ignored_keys=ignored) for child in value)
-    return _has_value(value)
-
-
-def _snapshot_row(platform: str, collected_at: str, product: dict[str, Any]) -> dict[str, Any] | None:
-    external_id = external_product_id(product)
-    if not external_id:
-        raise ValueError("Product is missing its external product ID")
-    current = normalize_current_product(product)
-    comparable = comparable_state(product)
-    prices = _section_or_empty(comparable, current, "prices")
-    inventory = _section_or_empty(comparable, current, "inventory")
-    shipping = _section_or_empty(comparable, current, "shipping")
-    shipping_payload = _shipping_payload(comparable, current)
-    shipping_rows = _shipping_rows(platform, shipping_payload)
-    seller = _seller_row(_object_or_empty(current.get("seller")))
-    return {
-        "platform": platform,
-        "external_product_id": external_id,
-        "collected_at": _parse_datetime(str(product.get("collectedAt") or collected_at)),
-        "product_name": _first_text(current, "productName", "name", "title"),
-        "product_url": _first_text(current, "productUrl", "affiliateUrl", "url"),
-        "image_url": _first_text(current, "imageUrl", "productImage"),
-        "backup_image_url": _first_text(current, "backupImageUrl"),
-        "source_specific": _source_specific_row(current),
-        "status": _text_or_none(current.get("status")),
-        "seller": seller,
-        "prices_payload": prices,
-        "inventory_payload": inventory,
-        "options_payload": current.get("options") if isinstance(current.get("options"), list) else [],
-        "options_complete": current.get("optionsComplete") is True,
-        "markets": _object_or_empty(current.get("markets")),
-        "shipping_payload": shipping_payload,
-        "primary_price": _decimal_or_none(_extract_primary_price(prices, current)),
-        "price_rows": _price_rows(platform, prices, current),
-        "stock_quantity": _decimal_or_none(_first_available_value(inventory, current, "stockQuantity")),
-        "shipping_fee": shipping_rows[0]["fee"],
-        "shipping_type": _text_or_none(_first_value(shipping_payload, "type", "feeType", "domeFeeType", "supplyFeeType")),
-        "shipping_rows": shipping_rows,
-        "is_free_shipping": _bool_or_none(_first_available_value(shipping, current, "isFreeShipping")),
-    }
-
-
-def _seller_row(seller: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": _text_or_none(seller.get("id")),
-        "nickname": _text_or_none(seller.get("nickname")),
-        "type": _text_or_none(seller.get("type")),
-        "grade": _text_or_none(seller.get("grade")),
-        "excellent_seller": _bool_or_none(seller.get("excellentSeller")),
-        "average_satisfaction": _text_or_none(seller.get("averageSatisfaction")),
-        "review_count": _decimal_or_none(seller.get("reviewCount")),
-    }
-
-
-def _source_specific_row(current: dict[str, Any]) -> dict[str, Any]:
-    source_specific = current.get("sourceSpecific")
-    row = dict(source_specific) if isinstance(source_specific, dict) else {}
-    category = current.get("category")
-    if isinstance(category, dict) and any(_has_value(value) for value in category.values()):
-        row.setdefault("category", category)
-    if isinstance(current.get("markets"), dict):
-        row["markets"] = current["markets"]
-    return row
-
-
-def _parse_datetime(value: str) -> datetime:
-    text = value.replace("Z", "+00:00")
-    dt = datetime.fromisoformat(text)
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
-def _object_or_empty(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _section_or_empty(comparable: dict[str, Any], current: dict[str, Any], key: str) -> dict[str, Any]:
-    comparable_section = _object_or_empty(comparable.get(key))
-    if any(_has_value(value) for value in comparable_section.values()):
-        return comparable_section
-    return _object_or_empty(current.get(key)) or comparable_section
-
-
-def _shipping_payload(comparable: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
-    current_shipping = _object_or_empty(current.get("shipping"))
-    comparable_shipping = _object_or_empty(comparable.get("shipping"))
-    payload = {
-        key: value
-        for key, value in comparable_shipping.items()
-        if _has_value(value)
-    }
-    payload.update(
-        {
-            key: value
-            for key, value in current_shipping.items()
-            if _has_value(value)
-        }
-    )
-    return payload or comparable_shipping
-
-
-def _first_text(payload: dict[str, Any], *keys: str) -> str | None:
-    for key in keys:
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
-def _first_value(payload: dict[str, Any], *keys: str) -> Any:
-    for key in keys:
-        value = payload.get(key)
-        if _has_value(value):
-            return value
-    return None
-
-
-def _first_available_value(primary: dict[str, Any], fallback: dict[str, Any], key: str) -> Any:
-    value = primary.get(key)
-    if _has_value(value):
-        return value
-    value = fallback.get(key)
-    return value if _has_value(value) else None
-
-
-def _has_value(value: Any) -> bool:
-    return value not in (None, "") and value != {"__value__": "__MISSING__"}
-
-
-def _text_or_none(value: Any) -> str | None:
-    if value in (None, ""):
-        return None
-    return str(value)
-
-
-def _bool_or_none(value: Any) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in TRUE_VALUES:
-            return True
-        if normalized in {"0", "false", "no", "n", "off"}:
-            return False
-    return None
-
-
-def _extract_primary_price(prices: dict[str, Any], current: dict[str, Any]) -> Any:
-    for key in ("productPrice", "salePrice", "price", "supplyPrice"):
-        value = prices.get(key) if key in prices else current.get(key)
-        if value not in (None, ""):
-            return value
-    for value in prices.values():
-        if isinstance(value, (int, float, str)) and not isinstance(value, bool):
-            return value
-    return None
-
-
-def _price_rows(platform: str, prices: dict[str, Any], current: dict[str, Any]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    if _has_value(prices.get("domeCurrentSupplyPrice")):
-        rows.append(
-            {
-                "market": "dome",
-                "price_type": "current_supply",
-                "amount": _decimal_or_none(prices.get("domeCurrentSupplyPrice")),
-            }
-        )
-    if _has_value(prices.get("supplyCurrentSupplyPrice")):
-        rows.append(
-            {
-                "market": "supply",
-                "price_type": "current_supply",
-                "amount": _decimal_or_none(prices.get("supplyCurrentSupplyPrice")),
-            }
-        )
-    if _has_value(prices.get("minimumRetailPrice")):
-        rows.append(
-            {
-                "market": "retail",
-                "price_type": "minimum_retail",
-                "amount": _decimal_or_none(prices.get("minimumRetailPrice")),
-            }
-        )
-    if _has_value(prices.get("recommendedRetailPrice")):
-        rows.append(
-            {
-                "market": "retail",
-                "price_type": "recommended_retail",
-                "amount": _decimal_or_none(prices.get("recommendedRetailPrice")),
-            }
-        )
-    if _has_value(prices.get("resaleMinimumPrice")):
-        rows.append(
-            {
-                "market": "resale",
-                "price_type": "minimum",
-                "amount": _decimal_or_none(prices.get("resaleMinimumPrice")),
-            }
-        )
-    if _has_value(prices.get("resaleRecommendedPrice")):
-        rows.append(
-            {
-                "market": "resale",
-                "price_type": "recommended",
-                "amount": _decimal_or_none(prices.get("resaleRecommendedPrice")),
-            }
-        )
-    if _has_value(prices.get("currentSupplyPrice")):
-        rows.append(
-            {
-                "market": platform,
-                "price_type": "current_supply",
-                "amount": _decimal_or_none(prices.get("currentSupplyPrice")),
-            }
-        )
-    if _has_value(prices.get("fixedPrice")):
-        rows.append(
-            {
-                "market": platform,
-                "price_type": "fixed",
-                "amount": _decimal_or_none(prices.get("fixedPrice")),
-            }
-        )
-    if rows:
-        return rows
-    return [
-        {
-            "market": platform,
-            "price_type": "primary",
-            "amount": _decimal_or_none(_extract_primary_price(prices, current)),
-        }
-    ]
-
-
-def _shipping_rows(platform: str, shipping: dict[str, Any]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    if _has_value(shipping.get("domeFee")) or _has_value(shipping.get("domeFeeType")):
-        parsed = parse_shipping_fee(
-            _first_value(shipping, "domeFeeRaw", "domeFee"),
-            shipping.get("domeFeeType"),
-            fee_payer=_first_value(shipping, "domeFeePayer", "feePayer", "deliWho", "who"),
-        )
-        rows.append(
-            {
-                "market": "dome",
-                "fee": parsed["shipping_fee"],
-                "shipping_type": _text_or_none(shipping.get("domeFeeType")),
-                **parsed,
-                "payload": _shipping_row_payload(shipping, "dome", parsed),
-            }
-        )
-    if _has_value(shipping.get("supplyFee")) or _has_value(shipping.get("supplyFeeType")):
-        parsed = parse_shipping_fee(
-            _first_value(shipping, "supplyFeeRaw", "supplyFee"),
-            shipping.get("supplyFeeType"),
-            fee_payer=_first_value(shipping, "supplyFeePayer", "feePayer", "deliWho", "who"),
-        )
-        rows.append(
-            {
-                "market": "supply",
-                "fee": parsed["shipping_fee"],
-                "shipping_type": _text_or_none(shipping.get("supplyFeeType")),
-                **parsed,
-                "payload": _shipping_row_payload(shipping, "supply", parsed),
-            }
-        )
-    if rows:
-        return rows
-    parsed = parse_shipping_fee(
-        _first_value(shipping, "feeRaw", "fee"),
-        _first_value(shipping, "type", "feeType"),
-        fee_payer=_first_value(shipping, "shippingPayment", "feePayer", "deliWho", "who", "type", "feeType"),
-    )
-    return [
-        {
-            "market": platform,
-            "fee": parsed["shipping_fee"],
-            "shipping_type": _text_or_none(_first_value(shipping, "type", "feeType")),
-            **parsed,
-            "payload": _shipping_row_payload(shipping, platform, parsed),
-        }
-    ]
-
-
-def _shipping_row_payload(shipping: dict[str, Any], market: str, parsed: dict[str, Any]) -> dict[str, Any]:
-    payload = dict(shipping)
-    payload["market"] = market
-    payload.update(parsed)
-    remote_area_fee = _remote_area_fee(shipping)
-    if remote_area_fee:
-        payload["remote_area_fee"] = remote_area_fee
-    payload["source_fields"] = _shipping_source_fields(shipping, market)
-    return payload
-
-
-def _remote_area_fee(shipping: dict[str, Any]) -> dict[str, Any]:
-    fees: dict[str, Any] = {}
-    jeju = _first_value(shipping, "feeExtraJeju")
-    islands = _first_value(shipping, "feeExtraIslands")
-    nested = shipping.get("remoteAreaFee") if isinstance(shipping.get("remoteAreaFee"), dict) else {}
-    jeju = jeju if _has_value(jeju) else _first_value(nested, "jeju")
-    islands = islands if _has_value(islands) else _first_value(nested, "islands")
-    if _has_value(jeju):
-        fees["jeju"] = jeju
-    if _has_value(islands):
-        fees["islands"] = islands
-    return fees
-
-
-def _shipping_source_fields(shipping: dict[str, Any], market: str) -> dict[str, Any]:
-    if market == "dome":
-        return {
-            "fee": _first_value(shipping, "domeFeeRaw", "domeFee"),
-            "type": shipping.get("domeFeeType"),
-            "tbl": shipping.get("domeFeeTable"),
-            "pay": _first_value(shipping, "domeFeePayer", "feePayer", "deliWho", "who"),
-        }
-    if market == "supply":
-        return {
-            "fee": _first_value(shipping, "supplyFeeRaw", "supplyFee"),
-            "type": shipping.get("supplyFeeType"),
-            "tbl": shipping.get("supplyFeeTable"),
-            "pay": _first_value(shipping, "supplyFeePayer", "feePayer", "deliWho", "who"),
-        }
-    source_fields = shipping.get("sourceFields")
-    if isinstance(source_fields, dict):
-        return dict(source_fields)
-    return {
-        "fee": _first_value(shipping, "feeRaw", "fee"),
-        "type": _first_value(shipping, "typeRaw", "type", "feeType"),
-        "pay": _first_value(shipping, "shippingPayment", "feePayer", "deliWho", "who"),
-    }
-
-
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, Decimal):
-        return int(value) if value == value.to_integral_value() else float(value)
-    if isinstance(value, dict):
-        return {key: _json_safe(child) for key, child in value.items()}
-    if isinstance(value, list):
-        return [_json_safe(child) for child in value]
-    return value
-
-
-def _decimal_or_none(value: Any) -> Decimal | None:
-    return parse_decimal(value)

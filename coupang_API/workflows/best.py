@@ -11,10 +11,9 @@ from psycopg.rows import dict_row
 from coupang_API.api.client import BestCategoryRequest, CoupangPartnersClient
 from coupang_API.api.rate_limiter import RateLimiter
 from coupang_API.config.best import load_best_config
-from coupang_API.config.settings import load_credentials
+from coupang_API.config.settings import find_project_root, load_credentials
 from coupang_API.persistence.best import BestStore
 from coupang_API.services.best import parse_best_records
-from coupang_API.workflows.collector import find_project_root
 
 LOGGER = logging.getLogger(__name__)
 
@@ -59,6 +58,7 @@ def collect_best(connection, client, config, day):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--mode', choices=('best',), default='best', help=argparse.SUPPRESS)
     parser.add_argument('--config',type=Path,required=True)
     parser.add_argument('--date',type=date.fromisoformat,default=datetime.now(timezone(timedelta(hours=9))).date())
     parser.add_argument('--dsn-env',required=True,help='Explicit target DSN env var; no automatic migration')
@@ -74,7 +74,7 @@ def main(argv=None):
     root = find_project_root(Path.cwd())
     access, secret = load_credentials(root)
     client = CoupangPartnersClient(access,secret,
-        rate_limiter=RateLimiter(config.requests_per_minute,60),max_retries=0)
+        rate_limiter=RateLimiter(config.requests_per_minute,60))
     with psycopg.connect(os.environ[args.dsn_env],row_factory=dict_row) as connection:
         status = collect_best(connection,client,config,args.date)
     print(status)

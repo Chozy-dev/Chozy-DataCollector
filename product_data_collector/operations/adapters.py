@@ -100,7 +100,7 @@ def handlers(config,connect,stop=lambda:False):
                 from coupang_API.api.rate_limiter import RateLimiter
                 from coupang_API.workflows.best import collect_best
                 cfg=load_best_config(Path(settings[source]['config']))
-                client=wrap(CoupangPartnersClient(*load_credentials(root),rate_limiter=RateLimiter(cfg.requests_per_minute,60),max_retries=0),source)
+                client=wrap(CoupangPartnersClient(*load_credentials(root),rate_limiter=RateLimiter(cfg.requests_per_minute,60)),source)
                 return collect_best(conn,client,cfg,day)
             from naver_API.config import load_config
             from naver_API.client import NaverClient

@@ -64,17 +64,17 @@ dateModify는 raw에 남기되 사건 발생시각으로 만들지 않는다. �
 
 ## 쿠팡
 
-기본 CLI는 카테고리 best이며, 키워드 검색은 `--mode legacy-search`로만 실행한다. best 파서는 [services/best.py](../coupang_API/services/best.py), 일일 수집은 [workflows/best.py](../coupang_API/workflows/best.py)다.
+쿠팡 수집 CLI는 `bestcategories`로 설정된 카테고리의 베스트 상품을 수집한다. `products/search`는 Spring 정밀분석에서 시장가 표본을 조회한다. 베스트 파서는 [services/best.py](../coupang_API/services/best.py), 일일 수집은 [workflows/best.py](../coupang_API/workflows/best.py)다.
 
 | 원본·요청 | 저장 의미 |
 | --- | --- |
 | 요청 categoryId, 기준일 | 응답 상품의 카테고리·일별 맥락 |
 | `productId`, `productName`, `productUrl`, `productImage` | 상품 표시 정보 |
-| `productPrice` | 가격. 검색 API 재고 부재는 NULL |
+| `productPrice` | 베스트 응답의 노출 가격 |
 | `rank`, `isRocket` | 응답 순위와 로켓배송 |
 | 로컬 전일 스냅샷 | previousRank·rankChange·rankStatus 계산 |
 
-HTTP 200이어도 `rCode/rMessage` 제한을 검사한다. limit=100 요청의 81개 반환을 관측했으므로 요청 limit만으로 응답 완전성을 확정하지 않는다. 같은 날짜의 카테고리 범위는 고정하며 모든 대상의 저장·검증이 끝나야 발행한다. 전일 완료본이 없으면 순위 변화를 0으로 만들지 않는다.
+HTTP 200이어도 `rCode/rMessage` 제한을 검사한다. limit=100 요청의 81개 반환을 관측했으므로 요청 limit만으로 응답 완전성을 확정하지 않는다. 동일 상품 ID가 서로 다른 순위로 반복되면 가장 높은 원본 순위의 행을 남기고 순위는 재부여하지 않는다. 순위 값 자체가 중복된 응답은 실패 처리한다. 홈 카테고리 이름은 요청 ID에 매핑한 설정값을 사용한다. 같은 날짜의 카테고리 범위는 고정하며 모든 대상의 저장·검증이 끝나야 발행한다. 전일 완료본이 없으면 순위 변화를 0으로 만들지 않는다.
 
 2026-09-02에는 검색 제한 후 best도 `rCode=403`을 반환했다는 과거 기록이 있다. 계정 예산은 두 경로를 함께 계산하며, 이 관측을 현재 계정의 고정 호출 한도로 해석하지 않는다. 당시 보고서의 수치와 원본 복구 위치는 [VALIDATION](VALIDATION.md)을 따른다.
 

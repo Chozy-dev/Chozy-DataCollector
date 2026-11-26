@@ -34,7 +34,7 @@ python -m product_data_collector.operations plan --config product_data_collector
 product_data_collector/   공통 도메인·PostgreSQL 저장·점수·통합 운영
 ownerclan_API/           오너클랜 수집
 domeggook_API/           도매꾹·도매매 수집
-coupang_API/             쿠팡 베스트·기존 검색 수집
+coupang_API/             쿠팡 카테고리별 베스트 수집·발행
 naver_API/               네이버 시즌 키워드·트렌드
 scripts/                개발 실행·DB 확인·내보내기
   probes/               실제 API 조사 도구
@@ -52,10 +52,6 @@ artifacts/              실행·조사·검증 산출물, Git 제외
   validation/           최신 JUnit·migration 계획·검증 캐시
 ```
 
-공급처의 `data/`와 기존 `logs/`는 실행 중 사용하는 저장 결과·재개 상태·로그·잠금 경로이며 Git에서 제외한다. 정리 대상으로 일괄 삭제하지 않는다. `scripts/`와 테스트 fixture 소스는 Git으로 관리한다.
-
-`docs/` 최상위에는 현재 기준 문서 6개를 둔다. 외부 참고 자료 원본은 `docs/references/`에서 Git으로 관리한다. 참고 자료의 과거 설계·수치는 현재 구현 상태로 간주하지 않으며, 현재 상태는 CONTEXT를 따른다.
-
 | 문서 | 내용 |
 | --- | --- |
 | [CONTEXT](docs/CONTEXT.md) | 현재 구현·미완료 기능·다음 작업·코드 위치 |
@@ -67,12 +63,4 @@ artifacts/              실행·조사·검증 산출물, Git 제외
 
 저장소 작업 규칙은 [AGENTS.md](AGENTS.md)를 따른다. 처음에는 README → CONTEXT → 해당 작업의 기준 문서 순서로 읽는다.
 
-파일과 폴더는 기능 이름을 사용한다. schema 모듈은 상품 저장·쿠팡 베스트·네이버 시즌·공급 점수·통합 운영·점수 무효화로 구분하며 [DATABASE](docs/DATABASE.md#migration과-백필)에서 실제 파일을 찾는다. 도매매 전체 적재·변경 동기화는 `workflows/product_sync.py`, CLI는 `workflows/sync_cli.py`다. DB에 기록된 migration 식별자와 기존 재개 경로는 유지한다.
-
-## 로컬 자료 관리
-
-상품 예시는 필드 형식·옵션·판매 상태를 확인하기 위한 자료다. 정상·품절·판매 종료·옵션 등 서로 다른 사례를 제공처별 최대 5개만 남긴다. 단위 테스트는 코드 안의 작은 fixture를 사용하므로 대량 실상품 표본을 보관할 필요가 없다.
-
-실험은 `artifacts/experiments/<조사명>/`에 모으고 임시 변환본은 그 안의 `scratch/`에서 작업 후 제거한다. 종료 후 결론과 한계는 VALIDATION에 반영하고 집계·고유 근거만 남긴다. 집계 JSON에 포함된 개별 결과, 이전 JUnit, PDF 추출본·렌더링은 누적 보관하지 않는다. 재현에 필요한 원본과 baseline은 보존하며, 과거 기록의 별도 복구가 필요하면 VALIDATION의 외부 백업 위치를 확인한다.
-
-기능·정책·진척은 해당 기준 문서를 갱신한다. 단계별 완료 보고서나 중복 README, `tmp/`·`archive/` 보관 폴더를 추가하지 않는다.
+수집 상태·잠금 파일과 조사 자료 관리 방법은 [RUNBOOK](docs/RUNBOOK.md#로컬-자료-정리)을 참고한다.

@@ -3,9 +3,10 @@ from psycopg.types.json import Jsonb
 
 from product_data_collector.domain.current_state import option_states
 
+from .storage_values import json_safe
+
 
 def save_options(connection, product_id, row):
-    from .postgres_storage import _json_safe
     options = option_states(row["platform"], row.get("options_payload", []), row.get("prices_payload"))
     columns = (
         "option_identity", "source_option_id", "identity_status", "option_name", "attributes",
@@ -23,7 +24,7 @@ def save_options(connection, product_id, row):
     if options:
         with connection.cursor() as cursor:
             cursor.executemany(query, [
-                (product_id, *(Jsonb(_json_safe(o[c])) if c in {"attributes", "raw_option"} else o[c] for c in columns),
+                (product_id, *(Jsonb(json_safe(o[c])) if c in {"attributes", "raw_option"} else o[c] for c in columns),
                  row["collected_at"], row["collected_at"]) for o in options
             ])
     if row.get("options_complete"):

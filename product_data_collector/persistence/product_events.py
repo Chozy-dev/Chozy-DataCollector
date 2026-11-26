@@ -3,7 +3,8 @@ from itertools import islice
 
 from psycopg.types.json import Jsonb
 
-from .postgres_storage import _json_safe, _lock_key
+from .postgres_storage import _lock_key
+from .storage_values import json_safe
 
 
 class EventSaveError(RuntimeError):
@@ -55,7 +56,7 @@ def insert_events(connection, rows, *, request_refresh=True, scope=None):
         product = connection.execute("SELECT id FROM products WHERE platform=%s AND external_product_id=%s",
                                      (row["platform"], row["external_product_id"])).fetchone()
         columns = tuple(row) + ("product_id",)
-        values = tuple(Jsonb(_json_safe(v)) if k in json_columns and v is not None else v for k, v in row.items())
+        values = tuple(Jsonb(json_safe(v)) if k in json_columns and v is not None else v for k, v in row.items())
         saved = connection.execute(
             f"INSERT INTO product_events ({','.join(columns)}) VALUES ({','.join(['%s'] * len(columns))}) "
             "ON CONFLICT (dedupe_key) DO NOTHING RETURNING id",
@@ -100,13 +101,13 @@ def record_verification(connection, event_id, *, before, after, evidence, relate
             raise ValueError("Related source event must belong to the same product/scope")
     if target["value_status"] in {"observed_change", "observed_unchanged"}:
         if (target["verified_before"], target["verified_after"], target["verification_evidence"], target["related_source_event_id"]) != (
-                _json_safe(before), _json_safe(after), evidence, related_source_event_id):
+                json_safe(before), json_safe(after), evidence, related_source_event_id):
             raise ValueError("Conflicting event verification")
         return False
     connection.execute(
         "UPDATE product_events SET verified_before=%s, verified_after=%s, value_status=%s, "
         "verification_evidence=%s, related_source_event_id=%s WHERE id=%s",
-        (Jsonb(_json_safe(before)), Jsonb(_json_safe(after)), "observed_change" if before != after else "observed_unchanged",
+        (Jsonb(json_safe(before)), Jsonb(json_safe(after)), "observed_change" if before != after else "observed_unchanged",
          Jsonb(evidence), related_source_event_id, event_id),
     )
     return True

@@ -35,7 +35,7 @@ def test_invalid_json_and_error_body_do_not_leak_raw_text():
         assert 'exact_empty_envelope_utf8' not in result
 
 
-def test_offline_plan_never_opens_network_or_loads_credentials(monkeypatch):
+def test_offline_plan_never_opens_network_or_loads_credentials(monkeypatch, ownerclan_comparison_plan):
     def forbidden(*args,**kwargs):
         pytest.fail('network/credentials accessed')
     monkeypatch.setattr(probe,'load_credentials',forbidden)

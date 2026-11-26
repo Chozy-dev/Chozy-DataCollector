@@ -1,13 +1,13 @@
 import pytest
 
-from domeggook_API.config import load_api_keys, load_config, load_keywords
+from domeggook_API.config import load_api_keys, load_config
 
 
-def test_keywords_ignore_blank_comments_and_duplicates(tmp_path):
-    path = tmp_path / "keywords.txt"
-    path.write_text("\n# comment\n안경 케이스\n선글라스 케이스\n안경 케이스\n", encoding="utf-8")
+def test_existing_discovery_page_size_config_is_compatible(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("discovery:\n  items_per_keyword: 80\n", encoding="utf-8")
 
-    assert load_keywords(path) == ["안경 케이스", "선글라스 케이스"]
+    assert load_config(path).discovery.list_page_size == 80
 
 
 def test_config_rejects_values_above_official_maxima(tmp_path):
