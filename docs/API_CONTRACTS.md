@@ -1,6 +1,19 @@
 # 공급처 API와 정규화 계약
 
-아래는 현재 코드와 보존된 실측의 해석 기준이다. 호출 예산은 운영 설정과 제공처 승인 범위로 정하며, 소규모 성공을 전체 계정의 처리량 보장으로 해석하지 않는다. 수치 요약은 [VALIDATION](VALIDATION.md)에 둔다.
+공급처 응답의 의미와 정규화 계약을 설명한다. 호출 한도는 아래 표, 실측은 [VALIDATION](VALIDATION.md), 설정·중단·재개는 [RUNBOOK](RUNBOOK.md#공동-호출-예산)을 참고한다.
+
+## 외부 API 호출 한도
+
+| API | 확인된 기준과 미확정 범위 |
+| --- | --- |
+| 쿠팡 `products/search` | 설계서에 분당 50회로 기록돼 있다. 현재 계정에 적용되는 한도는 운영 설정 전에 확인한다. |
+| 쿠팡 `bestcategories` | 응답 최대 100개는 상품 수다. 호출 속도와 상품 검색과의 계정 공유 한도는 미확정이다. |
+| 네이버 검색광고 `RelKwdStat` | 일일 호출량 상한 없이 속도를 제한한다. 연관 키워드는 고객 ID와 IP를 함께 고려하며 속도는 변동된다. [공식 FAQ](https://github.com/naver/searchad-apidoc/wiki/FAQ) |
+| NAVER API HUB 검색어 트렌드·쇼핑인사이트 | 공식 가이드는 API별 월 50,000건과 키당 최대 초당 50회를 안내한다. 월 호출량은 API별로 집계하며 같은 키의 여러 서비스 사용량은 합산한다. [공식 가이드](https://guide.ncloud-docs.com/docs/en/apihub-overview#call-limits) |
+| 네이버 개발자센터 데이터랩 검색어 트렌드 | 기존 개발자센터 경로는 하루 1,000회다. API HUB는 위 기준을 적용한다. [공식 명세](https://developers.naver.com/docs/serviceapi/datalab/search/search.md) |
+| 오너클랜·도매매 | 오너클랜은 [공식 안내와 실측 범위](#공식-호출-제한-안내의-범위)를 참고한다. 도매매는 [Private 변경 검색](#private-변경-검색)의 성공 응답과 호출 한도가 미확정이다. |
+
+기획 당시의 한도와 우선순위는 [Collector 설계서 §7.2](references/Chozy_DataCollector_설계서_실측반영_20261119.md#72-기획서에-적힌-한도와-유의사항)에 있다. 실제 공동 예산은 배포 계정의 사용량과 정책을 확인해 정한다. Spring 개발용 상한은 [서버 검증 설정](https://github.com/Chozy-dev/Chozy-Server/blob/main/docs/BACKEND.md#실데이터-검증용-공동-호출-한도)을 참고한다.
 
 ## 오너클랜
 
@@ -56,7 +69,7 @@ Open API 목록·일반 상세, 도매매 채널 상세, Private 변경 검색�
 
 승인 대기 상태다. 문서 기반 구현은 Bearer 인증, 최대 size 100, dateModify 범위와 opaque searchAfter 배열을 사용한다. **성공 실응답·시간대·종료 규칙·지연·보존 기간·삭제/채널 이탈 포착·실제 제한은 미확정**이다. getAllSupplyChk를 같은 기능의 대체로 간주하지 않는다.
 
-2026-11-21 재호출도 HTTP 200 안에 `result=false`, 오류 `401/UNAUTHORIZED`, `승인되지 않은 IP 입니다`를 반환했다. HTTP 성공만으로 권한이나 데이터 조회 성공을 판단하지 않는다. 최신 조건과 근거는 [VALIDATION](VALIDATION.md#도매매-private-동기화-재호출)을 따른다. 과거 `getItemViewES` 묶음 조회의 호출 제한 조사는 이 검색 API의 승인·한도를 입증하지 않는다.
+HTTP 상태와 본문의 `result`·오류 코드를 함께 판정한다. 변경 검색은 승인되지 않은 IP로 거부됐고 같은 Private 키의 ES 상세는 성공했다. 호출 조건과 최신 결과는 [VALIDATION](VALIDATION.md#도매매-private-동기화-재호출)에 있다. 변경 검색의 한도는 ES 상세의 과거 제한과 별도로 검증한다.
 
 dateModify는 raw에 남기되 사건 발생시각으로 만들지 않는다. 결과는 내부 `modification_signal`, occurred_at=NULL, ambiguous identity로 저장한다. 원본 전후값·실제 사건 종류를 추정하지 않는다. `channel.supply=true`는 현재 채널에서 이탈한 상품을 놓칠 수 있어 승인 후 복구 정책을 검토한다.
 

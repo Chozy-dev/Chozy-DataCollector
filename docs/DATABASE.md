@@ -118,6 +118,6 @@ Spring은 HTTP envelope·직렬화·기본 선택·사용자 로직을 담당한
 
 2026-11-21 복원 사본에서 `stage2_storage_contract`의 필수 컬럼·인덱스 및 공통 schema 검증을 통과했다. 따라서 stage1 ledger 부재만으로 stage1을 재적용하지 않았다. 누락된 위 5~8 순서의 네 migration은 사본에만 적용·재실행 검증했고 운영 ledger는 그대로다. 기존 데이터 전체 보존·백필 대조 결과는 [VALIDATION](VALIDATION.md#운영-db-복원과-통합-실행-준비)에 둔다. `CREATE INDEX`는 concurrent 방식이 아니므로 운영 writer와 충돌할 수 있으며, 사본의 짧은 실행시간을 운영 lock 보장으로 사용하지 않는다.
 
-**운영에는 네 migration 모두 아직 미적용**이다. 사본 검증 완료와 운영 적용 승인을 구분한다. 적용 직전 백업·복원 가능성, role/ACL·최소 권한, 잠금과 데이터/인덱스/WAL/임시 파일의 디스크 여유를 검토하고 최종 승인을 받는다. 전체 추천 배치·인덱스·보관 누적을 포함한 1,500만 상품 저장 용량은 미검증이며, 근거·남은 검증은 [VALIDATION](VALIDATION.md#1500만-규모와-운영-승인-전-남은-조건), 적용 gate는 [RUNBOOK](RUNBOOK.md#운영-전환-준비와-적용-순서)에 둔다.
+로컬 Docker DB 적용 상태는 [CONTEXT](CONTEXT.md#구현과-운영-상태)에 기록한다. 운영 대상은 적용 직전에 ledger, 역할·ACL, 백업과 복원 가능성, 잠금, 디스크 여유를 [RUNBOOK](RUNBOOK.md#운영-전환-준비와-적용-순서)대로 확인한다. 1,500만 상품의 발행·인덱스·보관 용량은 [별도 검증 과제](VALIDATION.md#1500만-규모와-운영-승인-전-남은-조건)다.
 
 구형 데이터는 [backfill.py](../product_data_collector/persistence/backfill.py)의 제한된 keyset batch로 옮긴다. 같은 이름으로 반복하여 재개하고, `--verify`의 next_id로 다음 범위를 대조한다. `--integrity-counts`는 명시적인 전체 스캔이다. 과거 history로 원본 사건을 생성하지 않는다. 실제 명령과 복구는 [RUNBOOK](RUNBOOK.md)에 둔다.

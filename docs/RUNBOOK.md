@@ -132,9 +132,9 @@ python -m product_data_collector.operations schedule --config operations.reviewe
 
 ### 공동 호출 예산
 
-계정+API 키별 second/minute/day/month 예약과 min_interval을 설정한다. HTTP 시도 전 별도 트랜잭션에서 `reserve_api_call`을 commit한 뒤 한 번 호출한다. 실패·timeout·commit 응답 불명은 환급하지 않으며 재시도는 다시 예약한다. HTTP 403/429는 차단 상태를 남기고 중단한다.
+`(account, api)`별 second/minute/day/month 상한과 `min_interval`을 설정한다. [외부 API 호출 한도](API_CONTRACTS.md#외부-api-호출-한도)를 확인한 뒤 실제 계정 정책을 적용한다. HTTP 시도 전 별도 트랜잭션에서 `reserve_api_call`을 commit한다. 실패·timeout·commit 응답 불명은 사용량에 남고 재시도에는 다시 예약한다. HTTP 403/429는 차단 상태를 남기고 중단한다.
 
-Spring도 같은 예약 함수를 사용해야 합산 한도를 보호할 수 있다. 현재 연동은 미완료다. require_platform_budget=true는 미연동 상태를 거부한다. Collector 전용 계정 보호만 명시적으로 수용할 때만 이 요구를 해제한다. platform_integrated 플래그만 true로 바꾸어 실제 연동을 대신하지 않는다.
+같은 자격증명으로 호출하는 Spring과 Collector 경로에는 같은 DB와 `(account, api)`를 설정한다. `require_platform_budget=true`는 미연동 상태를 거부한다. 모든 공유 호출 경로가 예약을 사용하는지 확인한 뒤 `platform_integrated=true`를 설정한다. 개발 검증과 운영 적용 상태는 [CONTEXT](CONTEXT.md#구현과-운영-상태)에 있다.
 
 기존 독립 CLI와 개발 wrapper에는 공동 예산이 자동 연결되지 않는다. 같은 계정을 병행 운영하려면 transport 연동을 먼저 확인한다.
 
@@ -168,7 +168,7 @@ retry는 같은 scope·기준시각을 유지한다. supersede는 기존 실패 
 
 ### 오너클랜 호출 속도와 오류 후 재개
 
-공식 숫자/미확정 계약은 [API_CONTRACTS](API_CONTRACTS.md#공식-호출-제한-안내의-범위), 최근 결과와 시간 환산은 [VALIDATION](VALIDATION.md#오너클랜-호출-정책과-하루-1만-상품-조사)에 둔다. 아래는 **내부 운영 권고**이며 제공처 보증값이나 이미 배포한 설정이 아니다. 현재 interval=.4초의150RPM은 승인/안정 한도로 사용하지 않는다.
+제공처 안내는 [API_CONTRACTS](API_CONTRACTS.md#공식-호출-제한-안내의-범위), 시도·확보 수는 [VALIDATION](VALIDATION.md#오너클랜-호출-정책과-하루-1만-상품-조사)에 있다. 아래 수치는 내부 운영 권고로, 배포 전 계정 상태와 함께 검토한다.
 
 - 회복 확인은 계정 합산30RPM 이하, 정상 확인 후 권고60RPM(worker1·최대100개). 120RPM은 공동사용/정상응답을 확인한 뒤 별도 지속 검증할 후보일 뿐이다. 응답이 느리면 시작 간격을 응답 뒤 추가로 매번 더하지 않는다.
 - HTTP시도/실패/보완/retry/인증과 Spring/외부호스트 사용을 함께 센다. JWT 재발급이 예산을 초기화하지 않는다. 최근 단건 성공으로 대량 회복·50개 축소·병렬 증가 효과를 확정하지 않는다.

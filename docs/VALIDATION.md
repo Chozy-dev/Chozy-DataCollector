@@ -8,66 +8,26 @@
 
 ## 오너클랜 5000개 표본 E2E
 
-**정정:** 아래 과거 실행에는 시험용 `SampleClient`가 보완 후 미반환에서 전송을 차단하는 조건이 개입했다. 실제 `refresh_details`는 그 상품만 pending/retry로 남기고 다음 묶음을 계속 처리한다. 따라서 “실제 수집기가299개에서 중단돼 E2E에 실패했다”는 기존 보고는 철회한다. API의 미반환 관측 자체와 저장/차단 수치는 당시 진단 결과로만 유효하다. 약5,000개 전체 수집 지속·완료시간은 검증되지 않았다.
+**약 5,000개 라이브 수집의 완료 시간과 지속 처리량은 미확인이다.** 최초 진단은 개별 상품이 보완 후에도 빠지면 이후 전송을 막는 시험용 조건으로 중단됐다. 이 조건을 제거했고 실제 worker의 요청 `[100,1,100]`에서 정상 199개 저장, 미반환 1개 pending 보존, 다음 묶음 진행을 격리 PostgreSQL로 확인했다. 점수와 발행은 상세 미완료 상태에서 차단된다.
 
-해당 조건을 제거하고 계측은 관찰만 하도록 수정했다. 실제 worker와 수정 controller를 연결한 격리 PostgreSQL 회귀에서 요청 크기 `[100,1,100]`, 정상199개 저장·미완료1개 보존을 확인했다. 코드: `tests/integration/test_ownerclan_probe_continuation.py`. 원본 기획서 PDF p.8의 매일 추천 갱신, p.28의 일일 배치와 대조했으며, 한 상품의 미반환 때문에 나머지 수집을 멈추라는 요구는 확인되지 않았다. 기존 Collector 설계 §23은 미반환 보완/미완료 보존, §오류정책은 소싱처 누락 시 이전 발행본 유지를 규정한다. 원본 서비스 기획이 개별 실패의 부분 발행까지 확정한 것으로 단정하지 않는다. 이번 정정은 API0회·운영DB 변경0회이며 업무 worker/점수 차단 정책은 변경하지 않았다.
+- 11월 22일 라이브 진단은 직전 KST 하루의 이력 앞 12페이지에서 12,000개 신호와 고유 상품 4,712개를 골랐다. 세 묶음에서 299개를 저장했으며 누락 1개는 보완에서도 HTTP 200과 빈 배열로 돌아왔다. 미요청 4,412개를 실제 미반환으로 세지 않는다. 당시 최종 실행은 HTTP 17회, 준비 진단을 포함하면 46회였다.
+- 수정 후 라이브 시험은 요청으로 중단됐다. 상세 요청 20회와 정상 응답 합계 1,194개가 기록됐다. 마지막 요청의 완료 여부, 고유 상품 수, 저장 완료량은 미확인이다.
 
-아래는 2026-11-22 KST의 **과거 진단 실행 수치**다. 시험 controller의 추가 중단 조건이 개입했으므로 업무 수집기의 약5,000개 완주 실패나 지속 처리량을 증명하지 않는다. 운영 DB/기존 checkpoint/lease/설정은 변경하지 않았다.
-
-전용 PostgreSQL16, CPU2/RAM2GiB/shared_buffers256MB/work_mem8MB, localhost55449/collector_stage1_test에서 업무 코드를 호출했지만 그 위의 진단 controller가 동작을 바꿨다. 직전 KST 하루(11월21일) 변경이력의 앞12페이지에서 고유 key4,712개를 선정했다. 전체 하루 순회가 아니며 정렬 순서·중복률의 대표성이 없다. 과거 마지막 진단은 누락1회 보완을 허용한 뒤에도 미반환이면 다음 전송을 차단했다. **이 추가 조건은 당시 잘못된 시험 설정이며 현재 제거됐다.**
-
-| 실제 API→격리 DB 구간 | 실측/판정 |
-| --- | --- |
-| 변경이력 표본 조회 | 12,000신호·12페이지·고유4,712key, 39.633초. hasNextPage=true이므로 하루 피드 미완료 |
-| 원본 이벤트/상세 요청 저장 | 이벤트11,996건·표본4,712개 요청, 55.101초. 수량 신호4건은 사건으로 만들지 않음 |
-| 상세100개 1차 | 100/100, HTTP구간10.218초 |
-| 상세100개 2차 | 100/100, HTTP구간3.469초 |
-| 상세100개 3차 | **99/100**, HTTP200·GraphQL오류0, 15.735초 |
-| 누락 1개 보완 | **0/1, 빈 배열**, HTTP200·GraphQL오류0, 0.141초. WFSV627 미완료 유지 |
-| 상세+부분저장/실패 기록 | 38.004초, 정상299개 commit. 표본미완료4,413개=누락1+미요청4,412 |
-| 점수/발행 | pending 때문에 **Detail refresh incomplete**로 차단. 점수0·발행0, 강제완료/삭제 없음 |
-| 주 실행 구간 | 132.757초(이력→차단까지, schema/auth 준비 제외). 5,000개 완료시간이 아님 |
-
-최종 실행은 인증1+이력12+상세4=HTTP17회다. 앞선 표본 선택 실행13회와 첫 누락에서 즉시 중단한 진단16회(279개 저장·누락21)를 포함해 **이번 작업 전체는 인증3+이력36+상세7=HTTP46회**다. 최초 실행은 정확히5,000개 조건 때문에 상세 전 중단했고, 이후 요청에 맞춰 약5,000개 허용 범위로 수정했다. 이 추가 준비 시간/호출을 숨기거나 처리량 분모에 합치지 않는다.
-
-full ITEM_FIELDS·POST JSON·worker1·시작간격3초·5/45초·HTTP자동retry/redirect0, 최종 실행의 누락만1초 뒤1회 보완을 적용했다. timeout/403/429/GraphQL제한은 모두0이다. worker failureCount101 중100개는 진단 중단 후 다음 claim이 전송 전에 거부돼 기록된 것이며, 실제 API누락은1개다. 모든 요청은 미완료로 보존했고 claim/실패 기록을 실제 반환 누락과 구분했다. local app대기/다른Python수집없음/운영공동예산테이블없음을 확인했으나 외부계정사용·제공처잔여예산은 미확인이다.
+재현은 `scripts.probes.ownerclan_live_e2e`의 무접속 plan부터 확인한다. 과거 진단과 보완 조건은 `artifacts/experiments/ownerclan-live-e2e/`, 수정 이후 부분 실행은 `artifacts/experiments/ownerclan-workflow-e2e/measurement.json`, worker 회귀는 `tests/integration/test_ownerclan_probe_continuation.py`에 있다.
 
 ### 5000개 저장 스냅샷 재생
 
-실제 API 실패 후 **추가 API0회**로 외부 검증 백업의 기존 상품5,000개와 연결된 이벤트11,995·관측5,118·옵션12,787행을 별도 schema에 재생했다. 원래 값/관측시각/ID를 보존했고 live 표본의 미완료 요청을 삭제하거나 완료 처리하지 않았다. 이 별도 snapshot scope에만 완료 증표를 만들었다.
+기존 상품 5,000개와 연결 행을 별도 schema에 재생했다. PostgreSQL 16, CPU 2코어·RAM 2GiB에서 원본 행 복원은 **6.034초**, initial 점수·발행은 **7.619초**, 유효 1,366개를 발행했다. 전체 상품 ID·순위·payload 차이는 0이었다. 90일 coverage·공급사 identity 근거 없이 신뢰도 NULL을 보존했다. 실제 API 시간과 대규모 발행·동시 부하는 측정 범위 밖이다.
 
-| 오프라인 재생 | 실측 |
-| --- | ---: |
-| 기존 행 COPY/trigger/commit | 6.034초 |
-| 실제 initial 점수5,000개+발행 | 7.619초 |
-| 유효1,366개 정렬/발행 SQL | 0.041737초(마지막commit 제외, 위시간에 포함) |
-| read_supply_home 10개 | 0.002918초 |
-| 전체 상품ID/순위/payload 차이 | 0 |
-
-coverage/공급사identity 근거0, 신뢰도5,000개 모두NULL을 보존했다. 실제90일 인증·공급사peer 계산·운영동시부하·Spring 프로세스·1,500만 전체정렬은 미검증이다. COPY는 기존DB행 재생이며 API 정규화·상품별 상세저장 throughput과 동일하지 않다. **이 재생 시간을 실패한 live 실행에 합쳐 전체 E2E 성공으로 표시하지 않는다.**
+재현은 `scripts.benchmarks.ownerclan_replay --dump <저장소밖검증백업>`, 집계는 `artifacts/experiments/ownerclan-live-e2e/snapshot-replay.json`을 참고한다.
 
 ### 하루 10만 변경의 조건부 해석
 
-아래는 당시 정상200개 prefix의 산술 기록일 뿐이며, 잘못된 시험 중단으로 약5,000개를 시도하지 못했으므로 **약3시간이라는 운영 용량 판단은 철회**한다. 실제 worker의 지속 처리와 retry/만료/전체 발행을 포함한 재측정이 필요하다.
-
-문서의 약10만은 과거 고유 변경104,251개 관측에 기반한 계획 가정이다. 점수대상은 `변경 ∪ 공급사영향 ∪ 만료`, 정렬/발행은 전체 유효카탈로그다. 다음은 작은 표본을 이용한 민감도 계산이며 실측/SLA가 아니다.
-
-| 조건부 구간 | 산식/환산 |
-| --- | --- |
-| 이력조회+이벤트/요청저장 | 최종 `(39.633+55.101)/12,000×신호수`. 하루15만~25만신호 시 **약20~33분**(앞선 실행은21~35분). 표본중복률을 하루 전체에 적용한 값은 아님 |
-| 상세+저장, 모든후속요청 완전반환 가정 | 정상앞200개 구간18.309161초(다음claim 포함)÷200×10만 = **약2시간33분**. 앞선 진단 환산은2시간38분. API만의 시간은 이미 포함돼 중복가산하지 않음 |
-| 점수 소규모 근거없는snapshot 가정 | 7.619/5,000×10만 = **약2.54분**. 실제90일/공급사peer·영향확대/만료·대규모인덱스 비용을 보장하지 않음 |
-| 정상반환 가정 소계 | 두 실행의 조건부 환산 범위 **약2.9~3.3시간 + 전체카탈로그 발행의 미검증 시간**. 위점수에 소규모발행이 포함되므로 실제대규모발행으로 교체해야 하며 그대로 이중가산하지 않음 |
-
-최종 실행에서도 빠진1개가 보완 후 미확보였다. **실제10만개 완료시간/상한은 산출불가**다. 이전17.8시간 지연환산과 이번 정상prefix환산은 서로 다른 시점/분모이며, 이번 시험으로 하루3시간 완료를 약속하거나 이전지연이 해소됐다고 판단하지 않는다. retry/DBbackoff·계정일/월예산·실제coverage/peer·전체발행을 검증해야 한다.
-
-수정 도구는 `scripts.probes.ownerclan_live_e2e`이며 누락 보완/다음 묶음 진행을 실제 worker에 맡긴다. `--bounded-recovery`는 호환 옵션이고 같은 동작이다. 수정 후 결과 경로는 `artifacts/experiments/ownerclan-workflow-e2e/`로 과거 진단 결과와 구분하며 아직 실제 재실행은 없다. 오프라인재생은 `scripts.benchmarks.ownerclan_replay --dump <저장소밖검증백업>`, 기본plan은 모두 무호출이다. 과거 근거는 `artifacts/experiments/ownerclan-live-e2e/bounded-recovery/{measurement,analysis}.json`과 상위 폴더의 `{measurement,selection-attempt,snapshot-replay,analysis}.json`이다. 기존 측정/해시는 덮어쓰지 않고 해석만 정정한다.
+관측된 고유 변경 104,251개는 계획 가정의 근거다. **기존 약 3시간 환산은 철회했다.** 정상 응답 일부와 소규모 저장 스냅샷이 분모였고, 라이브 전체 표본의 지속 처리, 재시도, 공급사 영향·만료, 전체 유효 상품 발행이 빠져 있다. 운영 완료 시간은 [1,500만 규모 검증 계획](#1500만-규모와-운영-승인-전-남은-조건)에서 재측정한다.
 
 ## 쿠팡 베스트 실데이터 검증
 
-2026-11-26 로컬 설정에서 주방용품 1013, 생활용품 1014, 스포츠/레저 1017을 선택했다. 첫 배치는 주방용품의 HTTP 200 응답에서 중복 검증 오류로 중단됐다. 나머지 두 카테고리의 추가 확인에서도 순위 충돌 없이 같은 상품 ID가 여러 순위에 나타났다. 같은 상품의 가장 높은 원본 순위만 저장하도록 수정하고 재검증했다.
-
-격리 PostgreSQL 16.16에서 쿠팡 HTTP 3회로 완료 발행본을 만들었다. 응답/발행 행은 주방용품 94/89, 생활용품 96/73, 스포츠/레저 81/68이고, 세 카테고리를 발행본 조회 함수로 확인했다. 초기 확인 3회와 재검증 3회를 합쳐 총 6회 호출했다. 단위 테스트 579개와 git diff 검사도 통과했다. 운영 DB는 사용하지 않았다. 집계는 `artifacts/validation/coupang-best-live.json`에 보관한다.
+2026-11-26 격리 PostgreSQL 16.16에서 같은 상품의 가장 높은 원본 순위만 남기도록 수정한 뒤, 쿠팡 HTTP 3회로 완료 발행본을 만들었다. 응답/발행 행은 주방용품 1013에서 94/89, 생활용품 1014에서 96/73, 스포츠/레저 1017에서 81/68이었다. 세 카테고리의 발행본 조회를 확인했다. 운영 DB는 사용하지 않았다. 중복을 확인한 초기 호출 3회를 포함한 전체 근거는 `artifacts/validation/coupang-best-live.json`에 있다.
 
 ## 회귀 실행 방법
 
@@ -108,117 +68,53 @@ python -m pytest tests/integration -q
 
 ## 오너클랜 API 지연 실측
 
-### 묶음 크기 영향 비교 계획
-
-수정한 controller의 후속 약5,000개 시험은 사용자 요청으로 중단했다. `artifacts/experiments/ownerclan-workflow-e2e/measurement.json`의 상태는 `interrupted_by_user`다. 기록된 상세 요청20회·정상 반환 합계1,194개는 중단 시점의 부분 관측이며 저장 완료/고유 확보량이나 지속 처리량으로 간주하지 않는다. 진행 중이던 마지막 요청의 완료 여부도 미확정이다. 자동 재개나 추가 API 호출은 하지 않았다.
-
-사용자 요청으로 아래 비교의 첫 실행을 수행했다. [실측](#묶음-크기-비교-실측) 이후 현재는 GraphQL 제한으로 중단했으며, 단건 완주/순서 교대 반복은 남아 있다. 단건에서도 timeout/빈 배열 이력이 있으므로 크기만을 원인으로 전제하지 않는다. 아래는 실험 설계의 기준이며 자동 재개 승인이 아니다.
-
-- 동일한 고정100개 key 집합을 1/10/20/50/100개씩 나눠 각 방식에서 같은100개를 대상으로 비교한다. full 필드·API/전송 방식·JWT·Session 정책·worker1·요청 시작 간격·timeout을 고정하고 **묶음 크기만** 바꾼다. 필드 수/호출 간격 비교는 별도 실험으로 분리한다.
-- 한 순회의 최소 조회 수는100+10+5+2+1=118회(인증·보완·재시도 별도)다. 실제 호출 전 계정 공동 사용·허용 예산·시간/자원 한도·오류 중단 조건을 정하고, 반복/순서 교대의 추가 예산도 따로 산정한다. 기존 중단 실행의 남은 예산을 자동 전용하지 않는다.
-- 요청/반환 key·누락/중복·응답 bytes·헤더/본문 시간·전체100개 시도/확보 시간·HTTP/GraphQL 오류·보완 결과를 기록한다. 누락은 보완/미완료로 보존하며, 계측 controller가 다른 묶음 진행을 임의로 막지 않는다. 제공처 제한/네트워크 오류/전체 예산 초과는 누락과 구분해 기록한다.
-- 캐시/시간대/순서 영향을 줄여 반복하고, **정상 응답 속도와 상품 완전성을 함께** 비교한다. 작은 묶음에서 반복적으로 빠르고 완전해지는지 확인한 뒤에만 운영 상한 변경·5,000개 지속 처리 재측정을 검토한다. 이번 문서 기록으로 실행이나 운영 설정 변경을 시작하지 않는다.
-
 ### 묶음 크기 비교 실측
 
-2026-11-22 17:48:59~17:56:13 KST, 기존 고정100개 key와 full ITEM_FIELDS를 사용했다. worker1·POST JSON·요청 시작간격3초·connect/read5/45초·자동 retry/redirect/필드 fallback/누락 보완0이다. 로컬 app은 signal.pause 대기, 호스트 Python 수집기는 관측되지 않았으며 외부 계정 사용량·제공처 잔여 한도는 미확인이다. 운영 DB/checkpoint/수집 설정은 변경하지 않았다.
+같은 상품 100개를 대상으로 worker 1개, 전체 상품 필드, 요청 시작 간격 3초, connect/read 5/45초, 자동 재시도·누락 보완 없이 비교했다. 2026-11-22 기준 **50·100개 묶음은 약 6초에 전부 반환했고, 10개와 단건에서도 빈 응답이 발생했다.** 단건은 별도 Session·JWT에서 24번째 요청의 GraphQL 호출 제한으로 중단됐다. HTTP 200이었으며 Retry-After와 reset 헤더는 없었다.
 
-| 요청 묶음 | 조회 시도 | 방식별 시도 시간(대기 포함) | 정상 확보/100 | 결과 |
-| --- | ---: | ---: | ---: | --- |
-| 100개 | 1회 | 5.709초 | 100 | 완료 |
-| 50개 | 2회 | 5.784초 | 100 | 완료 |
-| 20개 | 5회 | 25.764초 | 100 | 완료 |
-| 10개 | 10회 | 31.487초 | 90 | HTTP200 빈 배열1회로10개 누락 |
-| 1개, 별도 재측정 | 24/100회 | 79.521초까지 | 22 | 정상22회·빈 배열1회·GraphQL 제한1회, 나머지76회 미요청 |
+| 묶음 크기 | 조회 시도 | 경과 시간 | 반환/대상 |
+| --- | ---: | ---: | ---: |
+| 100개 | 1 | 5.709초 | 100/100 |
+| 50개 | 2 | 5.784초 | 100/100 |
+| 20개 | 5 | 25.764초 | 100/100 |
+| 10개 | 10 | 31.487초 | 90/100 |
+| 단건 재측정 | 24 | 79.521초 | 22/100 |
 
-표의10개/1개 시간은 **100개 확보 완료시간이 아니다.** 100/50/20개는 같은 JWT/Session의 내림차순 단회 관측이다. 최초 단건은28개 응답(정상27·빈 배열1)을 대조한 뒤 완료되지 않은 다음 호출 기록의 `http_seconds`를 집계하다 로컬 KeyError로 중단됐다. 이 부분을 단건 전체 비교에서 제외했다. 원래 예외는 집계 오류에 가려져 최초 유발 원인을 확정하지 못했다. 시간 미확정 기록을 허용하고 원래 예외를 보존하도록 수정했으며, 일시적인 atomic replace 실패에도 제한 재시도를 추가해 오프라인 회귀를 통과했다.
+10개·단건의 시간은 전체 100개 확보 시간이 아니다. 묶음 축소의 개선 효과와 단건 완주, 시간대·캐시·순서 효과는 미확인이다. 전체 비교를 재현할 경우 같은 key 집합과 전송 조건으로 순서를 교대한다. 한 순회 최소 118회에 인증·재시도 예산을 더하고, 계정 사용량과 제공처 오류 중단 조건을 먼저 확인한다.
 
-단건만 별도 인증/JWT/Session으로 새100개 연속 측정을 시작했으나24번째 조회에서 **HTTP200·GraphQL 제한 오류1개**가 관측돼 즉시 중단했다. Retry-After/rate-limit/reset 헤더는 없었고 제한 뒤 추가 확인/재시도는0회다. 두 실행의 UTC 관측 최소 시작 간격은 각각3.000174/3.000227초였다. 이 로컬 간격은 계정 전체 요청량이나 제공처 승인 한도의 증명이 아니다.
-
-전체 기록은 인증2+조회71=73개 시작 기록이며, 그중 초기 실행의 마지막 조회1개는 전송 완료 여부가 확인되지 않은 기록이다. 응답/전송 종료가 기록된 것은 **인증2+조회70=72회**다. 최초 실행에서 정한 상한은 조회118+인증1, 도구 오류 후 단건 보완 측정 상한은 별도 조회100+인증1이었으며 실제 사용은 위 기록과 구분한다. 최초 단건 부분 관측을 재측정에 합치거나 이전 응답으로 누락을 채우지 않았다.
-
-이번 관측에서는50/100개가 약6초에 같은100개를 확보했지만 0.075초 차이로 둘의 우열을 판단하지 않는다. 10개·단건에서도 빈 응답이 있어 **묶음을 줄이면 누락이 해결된다는 가설은 지지되지 않았다.** 단건 재측정은 JWT/Session/시간대가 달라 통제된 단일 실행 비교가 아니며, 캐시·순서 교대 반복·단건 완주·대량 지속 처리·계정 한도 원인·reset은 미검증이다. 운영 묶음/간격을 변경하거나 일일 E2E 시간을 외삽하지 않는다.
-
-도구는 `scripts.probes.ownerclan_batch_comparison`(기본 무접속 plan, `--execute`만 실제 호출, `--single`은 별도 단건 측정)이다. 기존 결과가 있으면 우발적 재실행을 거부한다. 근거는 `artifacts/experiments/ownerclan-batch-comparison/{measurement,single-measurement,analysis}.json`이며 원시 시작 기록은 수정하지 않고 분석에서 부분/미확정 기록을 구분했다. 고정 key/필드 hash는 각각 `369e724b342dbead0eed2d5c3ce56239da83268916f12b0866be4eabb3921208`/`911507659041f07d733a455a69bb109ffa739157e6ac8a6261687ba214491564`다. 향후 실제 호출은 제공처/공동 계정 한도와 reset 확인 및 새 실행 범위 검토 후 진행한다.
+재현은 `scripts.probes.ownerclan_batch_comparison`의 무접속 plan을 사용한다. `--execute`는 실제 호출, `--single`은 별도 단건 측정이다. 고정 key·필드 해시와 최초 단건 집계 오류 및 재측정 기록은 `artifacts/experiments/ownerclan-batch-comparison/{measurement,single-measurement,analysis}.json`에 있다.
 
 ### 오너클랜 소량 지연 재확인
 
-2026-11-22 03:41 KST, 인증 1+조회 3=HTTP 4회, 총 10.328초(인증·시작 간격 포함). full ITEM_FIELDS·POST JSON·worker 1·3초 시작 간격·5/45초·retry/redirect 0회였다.
+2026-11-22 단건 대조 3회에서 전송부터 헤더까지 **0.297~1.250초**를 기록했고 모두 정상 반환됐다. 같은 상품의 전날 대조에서는 item·새 Session bulk가 정상, 재사용 Session의 bulk가 HTTP 200과 빈 배열이었다. 순서·캐시·시간·연결 조건이 섞여 Session이 원인인지 미확인이다. 별도 지연 구간은 HTTP 19회에서 1,097개 확보·3개 미확보, 701.536초였다. timeout과 network backoff가 58.2%였지만 정상 응답도 평균 19.746초였다. 지연은 JSON 처리와 DB 저장 전 read 대기에서 관측됐다.
 
-| 상품/API | Session | 전송→헤더 | 반환 |
-| --- | --- | ---: | --- |
-| WFM25VZ / bulk1 | 새 A | 0.578초 | 1/1, soldout·가격 정상 |
-| WFSQRWB / bulk1 | 새 B | 0.297초 | 1/1, available·가격 정상 |
-| WFSQRWB / item | B 재사용 | 1.250초 | 1/1, available·가격 정상 |
-
-오류/누락/timeout 0회였다. 본문 읽기 계측 0은 시계 분해능 미만이며 실제 0초가 아니다. 헤더 시간은 연결/TLS/망/서버를 포함한다. `http_seconds`에는 adapter 페이싱이 포함돼 순수 전송 시간과 다르다. 이 표본은 지연 미재현이며 지속 처리·100개 묶음·일일 SLA 회복 증명은 아니다. `artifacts/experiments/ownerclan-latency-recheck/measurement.json`에 보존했다.
-
-### 오너클랜 API·Session 교차 실측
-
-2026-11-21 19:14:59~19:15:48 KST, 인증 1+조회 3=HTTP 4회, 49.203초 뒤 불완전 반환으로 중단했다. 같은 WFSQRWB에서 새 A/item 32.422초 정상, 새 B/bulk1 5.156초 정상, A 재사용/bulk1 8.609초에 정확한 `{"data":{"itemsByKeys":[]}}`+LF(28 bytes), HTTP 200·GraphQL 오류 없음이었다. 같은 JWT·full fields·bulk query SHA-256 `79c5c9a5c97902eb1d9f21060c9402f70b2366ac44d4926ccc99f6e9c137ede3`였다. 정상 대조·B 재사용 item은 중단 규칙상 미측정이다.
-
-순서·캐시·시간·연결이 섞여 Session 재사용 인과는 미확정이다. 실제 TCP 재사용과 서버 trace도 없다. 당시 첫 UTC 시작 간격은 2.995055초로 엄밀한 3초를 증명하지 못했고, 이후 **진단 도구의 pacing clock만** 고해상도 perf_counter로 수정·가상시계 회귀 검증했다. 원래 실측은 변경하지 않았다. `ownerclan-query-comparison/session-measurement.json`, `session-analysis.json`에 원문 envelope·hash·시계 한계를 둔다.
-
-### 과거 실패와 원인 판단
-
-| 관측 | 결과/해석 |
-| --- | --- |
-| 같은 100개를 20개씩 비교 | 세 번째 호출 HTTP 200에 0/20. 인증 1+조회 3, 59.594초에 40/100 확보·누락 20·미요청 40. 5/10/50/100 방식 미실행 |
-| 문제 key 원인 조사 | 정상 대조 bulk1과 WFSQRWB item 성공 뒤 동일 key bulk1이 45초 timeout. 과거 별도 28-byte 응답 원문은 복구 불가여서 이번 정확한 빈 배열과 동일하다고 확정하지 않음 |
-| 100/50/20 교차 비교 | 100개 timeout, 50개 방식 일부 확보, 20개 방식에서 다시 timeout. 묶음 축소의 일관된 개선 미입증 |
-| worker 1 대 2 소량 | 100개 3묶음·조회 3+인증 2, 175.248초. timeout 2묶음·나머지 99/100. 병렬 배수/처리량 산출 불가 |
-| 공식 한도 조사 실호출 | GraphQL 5+인증 2. 낮은 실효 RPM에서도 allItems·50개 상세 timeout, 101개는 오류 없이 1행. 현재 hard cap/분·시간·일 한도 미확정 |
-| 과거 1만 상세 | 최초 100회에 9,772개, 보완 포함 9,997/10,000. 처리 합 453.005초이며 연속 wall-clock/정확히 1만 완료시간이 아님 |
-| 지연 구간 HTTP 19회 | 701.536초에 1,097개 확보, 3개 미확보. 성공 HTTP 14회 276.441초, timeout 5회 225.327초, network backoff 183초, 보완 대기 3초, 미분리 13.768초. 마지막 commit 미포함 |
-
-timeout+network backoff는 위 지연 구간의 58.2%지만 성공 HTTP도 평균 19.746초였다. 90초 backoff는 기존 timeout 보호 정책이며 403/429의 증거가 아니다. 지연은 JSON/정규화/DB 이전 read 대기에서 관측됐다. 서버 resolver/cache/routing/숨은 제한·연결/망 중 원인은 분리하지 못했다. 제공처에 UTC·key·동일 query hash·정상/빈 envelope 자료로 trace 확인이 필요하며 메시지를 대신 발송하지 않았다.
-
-과거 성공과 현재 builder의 full fields/hash·POST JSON 의도는 대조했지만 당시 실행 바이너리·소켓 상태까지 증명하지는 못했다. full fields는 HTML content·이미지 바이너리를 포함하지 않는다. worker는 시작 간격을 긴 응답 뒤 추가로 매번 더하지 않으며, 누락 보완 1회와 timeout retry는 별개다. 설정·Session 정책·timeout·묶음은 이 소량 관측만으로 바꾸지 않는다.
+반복 장애 조사 시 실제 시각, 상품 key, query hash, 정상/빈 응답을 함께 대조한다. 근거는 `artifacts/experiments/`의 `ownerclan-latency-recheck/measurement.json`, `ownerclan-query-comparison/{session-measurement,session-analysis}.json`, `ownerclan-detail-latency/analysis.json`과 묶음·병렬 비교 기록이다.
 
 ### 오너클랜 호출 정책과 하루 1만 상품 조사
 
-공식 문구의 범위는 [API_CONTRACTS](API_CONTRACTS.md#공식-호출-제한-안내의-범위), 오류별 대기·재개는 [RUNBOOK](RUNBOOK.md#오너클랜-호출-속도와-오류-후-재개)에 둔다. 계정 전체 사용량·제공처 잔여 예산·reset은 여전히 미확인이다. 로컬 RPM guard는 제공처 승인 한도가 아니다.
+과거 상세 1만 개 표본은 최초 100회에 9,772개, 보완 포함 **9,997개**를 확보했다. 기록된 처리 시간 합계는 453.005초이며 연속 실행의 완료 시간이 아니다. `allItems(first:1)`의 과거 180 RPM 1시간 실측은 10,571시도·10,520성공·51오류였고, 200 RPM 시험에서는 885번째에 제한이 관측됐다. 다른 시점과 쿼리의 결과라 현재 묶음 worker의 계정 한도·리셋이나 처리 시간에 적용할 수 없다.
 
-과거 allItems(first:1)의 60/120/180 RPM 단기 성공, 180 RPM 1시간 10,571시도/10,520성공/51오류와 200 RPM 시험의 885번째 제한 기록은 당시 쿼리/계정 조건이다. 현재 묶음 worker의 처리량·시간/일 쿼터에 적용하지 않는다. 회복 확인용 30 RPM 이하→정상 시 권고 60 RPM→별도 지속 검증 후보 120 RPM을 이미 배포한 설정으로 읽지 않는다. 기존 interval=.4초는 설정상 150 RPM이지 승인/안정 한도가 아니다.
-
-호출 수는 `ceil(이벤트 수/1000)+ceil(고유 상세 대상/100)+보완/실패 재시도+인증/발견`이다. 고정 1만 key의 최소 상세는 100회, 10만 key는 1,000회다. 실제 지연·페이싱·예산·저장은 별도다. 일일 전체 모델은 `변경 저장 + (변경 ∪ 공급사 영향 ∪ 만료) 계산 + 전체 유효 집합 발행 + 재시도/동시 부하`이며 10만 변경=10만 계산=10만 정렬로 동일시하지 않는다.
-
-기존 10만 상세 환산 75.5분은 과거 소량 회복 시나리오, 17.8시간은 위 지연 구간의 조건부 환산이다. 26.7시간(단순 1.5배)이나 36~39시간 전체 표는 검증된 상한이 아니므로 현재 예측에서 제외했다. 두 timeout 후 성공을 매 묶음 가정하면 API/retry만 약 56.45시간이나 이것도 정책 민감도 예시일 뿐 상한이 아니다. 모든 실패가 재시도 뒤 성공한다는 보장과 당일 예산이 없으면 유한 완료시간을 보장할 수 없다.
+호출 수는 `ceil(이벤트 수/1000) + ceil(고유 상세 대상/100) + 보완·재시도 + 인증·발견`이다. 고정 1만 key의 상세 최소 100회, 10만 key는 1,000회다. 실제 지연·페이싱과 저장은 별도 계측한다. 제공처 안내는 [API_CONTRACTS](API_CONTRACTS.md#공식-호출-제한-안내의-범위), 운영 속도와 오류별 재개는 [RUNBOOK](RUNBOOK.md#오너클랜-호출-속도와-오류-후-재개), 원시 집계는 [근거 색인](#근거-색인과-복구-위치)을 참고한다.
 
 ## 도매매 Private 동기화 재호출
 
-2026-11-25 02:17 KST, 같은 로컬 환경에서 `_search`를 아래와 같은 조회 조건으로 1회 재호출했다. HTTP 200(0.158초), `result=false`, `401/UNAUTHORIZED`, 상세 메시지 `승인되지 않은 IP 입니다`가 반환됐다. 재시도·페이지 순회·DB 접근은 없었다.
+**2026-11-25 02:17 KST 기준, 로컬 IP에서 Private 변경 검색 승인이 필요하다.** `_search`를 최근 24시간·`size=1`·`channel.supply=true`·`no` 내림차순으로 한 번 호출했다. HTTP 200 안에 `result=false`, `401/UNAUTHORIZED`, `승인되지 않은 IP 입니다`가 반환됐다. 같은 환경과 Private 키로 `getItemViewES` v4.0(`market=supply`, 상품번호 `12473769`) 상세 조회는 성공했다. 따라서 상세 조회 성공으로 변경 검색 권한을 판정할 수 없다.
 
-2026-11-25 02:09 KST, 로컬에서 `_search`를 최근 24시간·`size=1`·`channel.supply=true`·`no` 내림차순으로 1회 호출했다. 0.249초에 HTTP 200과 `result=false`, 오류 `401`(`권한이 없습니다`)가 반환됐다. 이번 호출에서 확인한 값으로는 거부 사유를 특정할 수 없다. 재시도·페이지 순회·DB 접근은 없었다.
-
-같은 날 02:13 KST, 같은 Private 키로 ES 상품상세조회 `getItemViewES` v4.0(`market=supply`, 상품번호 `12473769`)를 1회 호출했다. HTTP 200(0.172초)과 요청한 상품의 상세 응답을 확인했다. 동기화 `_search`의 권한 거부는 위 응답에 기록했다.
-
-2026-11-21 17:02 KST, `_search` 최근 24시간·size=1·channel.supply=true·no 내림차순으로 1회, 0.190초에 HTTP 200이나 `result=false`, `401/UNAUTHORIZED`, `승인되지 않은 IP 입니다`였다. retry·페이지 순회·DB 저장은 없었다. 승인·성공 응답·시간대/종료/완전성·한도는 미검증이다. 근거는 `artifacts/validation/domeggook-private-sync.json`. 과거 getItemViewES의 HTTP 429(약180~190 RPM)를 Private 한도에 대입하지 않는다.
+승인 후 성공 응답·시간대·페이지 종료·완전성·호출 한도를 확인한다. 근거는 `artifacts/validation/domeggook-private-sync.json`과 [동기화 원시 기록](#근거-색인과-복구-위치)이다.
 
 ## 운영 DB 복원과 통합 실행 준비
 
-2026-11-21 운영 논리 백업을 격리 `collector_operations_copy`에 복원하고 기존 네 migration을 순차 적용·재실행 no-op 확인했다. 운영 DB는 변경하지 않았다.
+2026-11-21 논리 백업을 격리 `collector_operations_copy`에 복원해 점수·운영 migration 네 개의 적용과 재실행 no-op을 확인했다. 상품 5,240·옵션 13,307·관측 5,358·이벤트 294,806·상세 요청 205,268·검색 순위 18,194행의 해시와 sequence가 일치했다. 500-keyset 백필은 전체 5,240개를 대조했고 기존 행 업데이트, orphan, 잘못된 이벤트 연결은 0건이었다. 필수 컬럼·인덱스 검사 통과로 stage1 재적용은 불필요했다.
 
-| 사본 migration | 시간 | WAL bytes |
-| --- | ---: | ---: |
-| stage7_supply_scoring | 0.153초 | 448,792 |
-| stage8_operations | 0.106초 | 284,480 |
-| stage7_history_policy_v2 | 0.022초 | 4,912 |
-| stage10_scoring_performance | 0.026초 | 10,048 |
-
-상품 5,240·옵션 13,307·관측 이력 5,358·이벤트 294,806·상세 요청 205,268·검색 순위 18,194개 전체 행 해시와 sequence를 보존했다. 500-keyset 전체 백필 5,240개 완료·업데이트 0, 대조 차이/orphan history/잘못된 event 연결 0이었다. 필수 stage2 컬럼/인덱스 validator 통과로 ledger 없는 stage1 재적용은 불필요했다. CPU 2/RAM 2GiB·작은 DB 단회 결과이며 운영 잠금/1,500만 index 생성시간 보장이 아니다.
-
-fixture E2E는 실제 Runner/adapter/history/detail/store/score/publish/read_supply_home을 사용했다. 공급처만 in-memory였으며 initial→새 job incremental, 실패/재개·이전 홈 유지·완료 job 중복 실행을 검증했다. 실제 Spring·외부 API를 포함한 운영 전체 E2E와 구분한다. 사본에도 pending 184,385개가 남아 점수/완료 증표가 차단됐고 coverage/identity/receipt/발행 배치 0이었다.
+실제 Runner의 initial→새 job incremental, 실패·재개, 이전 홈 발행본 유지와 중복 실행을 가짜 공급처로 검증했다. 복원 시 pending 184,385개인 사본은 새 점수와 완료 증표가 차단됐다. 작은 검증 DB의 결과이며 운영 잠금, 대규모 인덱스 생성시간, 운영 Spring·외부 API는 별도 검증 대상이다.
 
 ### 최신 운영 migration 사전 점검
 
-2026-11-22 읽기 전용 감사: PostgreSQL 16.15, DB 약391MB, ledger는 `stage2_storage_contract`와 `drop_payload_based_change_history_20260904`뿐이며 네 migration은 계속 운영 미적용이다. 관측 시 다른 세션·잠금 0, app 대기, ownerclan pending 184,385개였다. C: 여유 약165.6GB·Docker FS 약1.018TB·현재 WAL 약134.2MB는 현재 작은 DB의 값이다.
+2026-11-22 읽기 전용 감사 시 DB 용량은 약 391MB였다. 당시 ledger에는 `stage2_storage_contract`와 `drop_payload_based_change_history_20260904`만 있었고, 앱 계정 `collector`는 superuser였다. 이후 로컬 Docker 적용과 Spring 실예약 확인은 [현재 상태](CONTEXT.md#구현과-운영-상태)에 기록한다.
 
-새 복구점 `C:/dev/Chozy/backups/migration-preflight-20261122/`: custom dump 25,853,686 bytes(4.445초), data/config/.env ZIP, 비밀번호 제외 role 정의·SHA manifest. ZIP/현재 상태 차이 0. 새 격리 DB에 19.256초 복원 후 schema/인덱스 검사와 기존 사본의 전체 행 해시가 일치해 기존 migration/백필 검증을 재사용했다. `--no-owner --no-acl` 복원이므로 role/ACL·로그인 비밀번호·PITR·서버 장애 복구까지 증명하지 않는다. 이전 복구점은 `C:/dev/Chozy/backups/operations-readiness-20261121/`다.
+복구점은 `C:/dev/Chozy/backups/migration-preflight-20261122/`의 custom dump·data/config/.env ZIP·비밀번호 제외 역할 정의·SHA manifest다. 격리 DB 복원 후 기존 사본과 스키마·인덱스·전체 행 해시가 일치했다. `--no-owner --no-acl`을 사용했으므로 역할/ACL·로그인 비밀번호·PITR을 별도 검증한다. 감사 시점의 상태는 적용 직전에 다시 확인한다.
 
-유일한 앱 로그인 `collector`는 superuser/createdb/createrole/replication/bypassrls이고 별도 Spring/runtime 최소 권한 역할이 없다. `read_supply_home`, `reserve_api_call`은 SECURITY INVOKER라 EXECUTE만으로 충분하지 않으며 예산 테이블 직접 UPDATE는 우회 위험이 있다. 운영 권한은 변경하지 않았다. 최소 권한·실제 연결 역할·전환 창·적용 직전 상태 재확인·최종 승인이 남는다. 쓰기 대상은 기존 네 migration뿐이며 수집·점수·자동화 활성화와 별개다. 적용/복구 절차는 [RUNBOOK](RUNBOOK.md#운영-전환-준비와-적용-순서).
-
-감사/복원 근거는 `artifacts/validation/migration-preflight.json`, `migration-backup-restore.json`, 검토 SQL은 `migration-preflight-plan.sql`(SHA-256 `eea6fa6f300164651ca35a9331554c986e60146092d2061a861fa1b096ee5332`)이다. 감사는 point-in-time이며 writer fence가 아니다.
+근거는 `artifacts/validation/{migration-preflight,migration-backup-restore}.json`, 검토 SQL은 `migration-preflight-plan.sql`, 실행 순서는 [RUNBOOK](RUNBOOK.md#운영-전환-준비와-적용-순서)에 있다.
 
 ### DB 권한 분리 검증
 
@@ -228,7 +124,7 @@ fixture E2E는 실제 Runner/adapter/history/detail/store/score/publish/read_sup
 
 두 역할의 동시 예약8건에서 한도5건만 reserved·나머지3건 exhausted:day였고 실제 usage5를 보존했다. 차단 함수는 blocked=true만 설정하고 직접 차단 해제/사용량 삭제는 거부했다. 임시 동명 테이블로 예산/조회 함수를 가리는 시도도 통과하지 못했다. 복원 사본의 미완료 상세184,385개는 전후 동일하고 runtime 점수 실행은 `Detail refresh incomplete`로 차단됐다.
 
-근거는 `artifacts/validation/database-access.json`, 새 역할용 SQL은 `database-access-plan.sql`, 재현은 `python -m scripts.rehearse_access`의 기본 무접속 plan이다. 이 결과는 사본의 DB 권한·fixture 프로세스 검증이며 실제 Spring 배포/로그인·공동 계정 운영·tenant별 권한·쿠팡/네이버 권한·PITR은 미검증이다. 운영의 기존 네 migration·helper·권한/DSN 전환은 모두 미적용이다.
+근거는 `artifacts/validation/database-access.json`, 새 역할용 SQL은 `database-access-plan.sql`, 재현은 `python -m scripts.rehearse_access`의 무접속 plan이다. 이 시험의 범위는 사본의 DB 권한과 fixture 프로세스다. 실제 연동·권한 전환 상태는 [CONTEXT](CONTEXT.md#구현과-운영-상태)에 있으며, tenant별 권한과 PITR은 별도 검증 대상이다.
 
 ## 보존된 성능 검증
 
@@ -244,49 +140,15 @@ fixture E2E는 실제 Runner/adapter/history/detail/store/score/publish/read_sup
 
 순위/집합/업무 payload 동일(증분 미변경 상품 asOf/observedAt 보존 차이 제외), DB 증가 +5.0%, Python RSS 표본 +5.8%. 단회 결과이며 모든 자원 지표가 개선된 것은 아니다. 근거는 `collection-pipeline-benchmark/`, `scoring-optimization-benchmark/`이고 before에는 보존된 `baseline_scoring.py`가 필요하다. provenance의 과거 경로는 `artifacts/validation/purpose-names.json`과 대조한다.
 
-### 추가 성능 측정과 채택 판단
-
-기존 `operations-readiness/publication-capacity.json`의 **seconds_including_commit**: 50만 유효 상품 23.866635초(work_mem 8MB), 16.741411초(64MB). **16,723.9초의 보존 근거는 없다.** EXPLAIN ms와 벽시계 초를 혼동하지 않는다. 10만은 각각1.290/2.168초, WAL 103.6~105.8MB; 50만 WAL 538.5~556.4MB. LIKE fixture는 인덱스/CHECK는 유지하지만 FK/입력 trigger·실제 분포는 재현하지 않았다. SELECT EXPLAIN은 external merge와 temp written 약42,200 blocks(346MB)를 보였다.
-
-정렬에서 payload를 뺀 MATERIALIZED rank CTE+join 대안의 50만 ABBA: current7.947/17.326초, candidate15.967/14.329초, 전체 순위 차이0. 안정적 이득이 없어 대안 SQL·work_mem 확대를 채택하지 않았다. `publication-comparison.json`, `publication-comparison-sql.json`에 근거를 둔다.
-
-### 발행 비용 분리와 migration 사전 점검
-
-2026-11-22 `publication_profile.py`의 별도 합성 payload 부분집합·전부 유효 fixture. 원본 상품 FK/입력 trigger는 생략했지만 발행 FK/두 unique 인덱스를 유지했다. work_mem8MB, CPU2/RAM2GiB/shared_buffers256MB에서 실제 publish+commit을 측정했다.
-
-| 행 수 | 기본 → seqscan 비활성 → seqscan 비활성 → 기본 |
-| --- | --- |
-| 100,000 | 2.025 → 2.719 → 3.494 → 3.544초 |
-| 500,000 | 16.355 → 11.292 → 22.169 → 11.632초 |
-
-8회 모두 전체 product_id/순위/payload 차이0. **기본도 인덱스 계획**이어서 접근 방식 개선을 분리한 실험이 아니고 cache/checkpoint 상태도 통제하지 않았다. planner 설정은 채택하지 않았다. 50만 INSERT10.961~21.820초·완료 UPDATE.272~.286초·commit.003~.501초. 별도 실제 INSERT EXPLAIN14.410초 중 입력 subquery1.297초, temp0이었다. heap-only4.379초는 인덱스·충돌 검사·FK가 함께 빠진 값이라 각각의 기여율로 해석하지 않는다. EXPLAIN 노드 시간은 누적값이라 합산하지 않는다.
-
-해당 50만 배치 heap/TOAST314.5MB·인덱스56.0MB·WAL448.1~463.4MB. 작은 합성값을 전체 DB/1,500만 용량으로 환산하지 않는다. 후속 비용 분리는 아래에 기록한다. 인덱스/충돌 처리를 제거하려면 중복 실행·실패·이전 완료본 보존 계약부터 증명해야 한다. 근거는 `artifacts/experiments/publication-profile/profile.json`.
-
 ### 발행 쓰기 비용의 반복 비교
 
-2026-11-22 새 전용 PostgreSQL16·CPU2/RAM2GiB/shared_buffers256MB/work_mem8MB/max_wal_size512MB/checkpoint_timeout1h에서 동일 합성 payload·고정 순위 분포로 10만/50만×6조건×3회=36회를 비교했다. 최종 실행에는 다른 테스트/복원/benchmark를 함께 돌리지 않았다. 앞선 탐색 실행은 일부에 테스트/복원이 겹쳐 최종 비교에서 제외했다. 원본 상품 FK/입력 trigger·실제 상품 분포·동시 Spring 부하는 생략했으며, 발행 FK는 해당 조건에 명시적으로 유지했다. 순서를 교대/회전했으나 cold cache를 재현한 것은 아니다.
+**채택한 변경은 발행 INSERT에서 충돌 무시를 제거하고, 실행 행 잠금으로 동시 호출을 직렬화한 것이다.** 50만 유효 상품의 합성 데이터에서 INSERT+commit 중앙값이 **9.266초 → 6.764초(-27.0%)**였다. 적용 후 실제 `publish()`+commit은 3회에 **6.600/6.729/6.856초**였고 전체 상품 ID·순위·payload 차이는 0이었다. 재호출 no-op, 동시 호출, 미완료 배치 차단, 이전 발행본 보존, commit 응답 유실 재개는 집중 회귀 63개로 확인했다. [발행 계약](ARCHITECTURE.md#증분과-발행)
 
-| 50만 INSERT+commit 조건 | 중앙값(최소~최대), 초 | WAL, MB |
-| --- | ---: | ---: |
-| heap만 | 2.490 (2.275~2.671) | 304.9 |
-| 동일 키의 비고유 인덱스2개 | 12.273 (4.514~12.632) | 403.5~416.8 |
-| 고유 인덱스2개 | 6.806 (5.576~13.710) | 407.5~417.9 |
-| 고유 인덱스+ON CONFLICT | 7.123 (6.405~13.464) | 431.6~439.6 |
-| 위 조건+발행 FK | 13.197 (9.547~19.614) | 431.5~443.8 |
-| 위 조건+직전 명시적 CHECKPOINT | 10.947 (9.396~11.478) | 433.8~434.2 |
+비교는 전용 PostgreSQL 16·CPU 2코어·RAM 2GiB·work_mem 8MB에서 동일 합성 payload, 발행 FK와 고유 인덱스 2개, 실행 직전 CHECKPOINT를 유지해 대안별 3회 교대했다. 50만 FK 발행 조건의 기록은 WAL 431.5~443.8MB, heap/TOAST 292.7MB·인덱스 44.1MB였다. 실제 분포·원본 trigger·Spring 동시 조회는 제외했다. 쓰기 비용 비교에서 인덱스·FK별 독립 기여율은 확정하지 못했고, planner/work_mem 변경과 순위 CTE 대안은 채택하지 않았다.
 
-각 값은 독립 실행이며 **행 간 차이를 합산해 기여율로 해석하지 않는다.** 비고유/고유 인덱스의 시간 역전과 큰 편차 때문에 고유 검사 자체의 비용을 이 표의 차이로 확정할 수 없다. FK 조건의 실제 EXPLAIN에서는 입력 subquery1.181~1.247초, FK trigger2.271~2.338초/50만회, root I/O read.100~.120초/write.427~.559초, temp written0을 관측했다. 노드 시간은 누적값이며 합산하지 않는다. 직전 CHECKPOINT 자체는.068~.320초로 표 시간 밖이며 운영 checkpoint 중첩·WAL CPU 비용의 독립적인 인과 실험은 아니다.
+이전 50만 단회 기록은 work_mem 8MB에서 **23.867초**, 64MB에서 **16.741초**다. 측정 조건이 달라 위 개선율의 기준으로 사용하지 않는다. EXPLAIN 밀리초와 벽시계 초는 별도로 읽는다.
 
-36회 모두 전체 ID 집합·동점 순위·payload 차이0이다. 동일 source에 변경하지 않은 업무 `publish()`를 호출한 별도 단회는 10만1.731초/50만8.566초였고 완료 후 재호출에서 중복 행0이었다. 이전 측정과 payload·cache 조건이 달라 코드 최적화 효과로 보고하지 않는다. FK 조건의 50만 heap/TOAST292.7MB·인덱스44.1MB, 전용 volume 약1.268GB를 확인했으며 실제 1,500만 전체 DB 용량으로 환산하지 않는다. 원문 EXPLAIN BUFFERS/WAL/trigger·bgwriter 전후값·commit·크기는 `artifacts/experiments/publication-costs/results.json`에 보존한다.
-
-재현: 새 전용 `chozy-publication-costs` 서버를 기존 profile 예시와 같은 자원/포트/label로 만들고 `-c checkpoint_timeout=1h`를 추가한 뒤 `python -m scripts.benchmarks.publication_costs --execute`를 실행한다. 기본값은 무접속 plan이며 기존 4GiB/25분 guard를 유지한다. 최종 운영 서버/분포/SLA/보관 기간 확정과 100만→300만→500만→1,500만 실측은 계속 남는다.
-
-동일 source·고유 인덱스2개·발행 FK를 유지하고 각 실행 직전 CHECKPOINT를 수행한 후 `ON CONFLICT`와 plain INSERT를 ABBA+BA 순서로 각3회 비교했다. EXPLAIN INSERT+commit 중앙값은 **9.266→6.764초(약27.0% 감소)**, 범위는 각각8.759~16.461초/6.542~9.505초였으며 전체 ID/순위/payload 차이0이었다. 이는 합성 INSERT 구간의 비교이며 일일 수집/점수 전체의 개선율이 아니다. WAL 비활성화·인덱스/FK 제거·planner 설정 변경은 채택하지 않았다.
-
-발행 행 INSERT의 충돌 무시만 제거하고 scoring_runs 행 잠금·완료본 재호출 no-op·영속화된 미완료 행의 무결성 검토 차단을 보강해 채택했다. 새 실제 `publish()`+commit 50만 건3회는 **6.600/6.729/6.856초**, 매번 재호출 후에도50만 행·순위/payload 차이0이었다. 이전 업무 경로의8.566초는 단회이므로 전체 함수 개선율로 확정하지 않는다. 동시 직접 호출·미완료 배치의 잘못된 payload 혼합 차단·기존 rollback/다른 소싱처 보존·commit 응답 유실 재개는 집중 회귀63개에서 통과했다. 의미/차단 정책은 [ARCHITECTURE](ARCHITECTURE.md#증분과-발행)를 따른다.
-
-추가 근거는 `artifacts/experiments/publication-costs/conflicts.json`, 재현은 위 비용 fixture 완료 후 `python -m scripts.benchmarks.publication_conflicts --execute`, 채택 함수 검증은 같은 명령에 `--verify-publish`를 추가한다. 두 도구 모두 기본값은 무접속 plan이다.
+재현 도구는 `scripts.benchmarks.publication_costs`와 `publication_conflicts`이며 기본값은 무접속 plan이다. 대안 비교는 비용 fixture를 만든 뒤 `--execute`, 적용 경로 검증은 `--verify-publish`를 추가한다. 근거는 `artifacts/experiments/publication-costs/{results,conflicts}.json`, 과거 탐색은 `publication-profile/profile.json`과 `operations-readiness/publication-{capacity,comparison,comparison-sql}.json`에 있다.
 
 ### 1500만 규모와 운영 승인 전 남은 조건
 
