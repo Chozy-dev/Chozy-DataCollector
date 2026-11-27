@@ -1,5 +1,4 @@
 """Thin adapters to supplier workflows; no alternate collection logic."""
-import os
 import hashlib
 import json
 from pathlib import Path
@@ -25,23 +24,30 @@ def handlers(config,connect,stop=lambda:False):
         def perform(conn,job):
             spec=settings[source]
             if source=='domeggook':
-                from domeggook_API.api.client import create_domeggook_client
-                from domeggook_API.config import load_config,load_api_keys
-                from domeggook_API.workflows.product_sync import incremental,catalogue
-                from domeggook_API.api.private_sync import PrivateSyncClient
+                from domeggook_API.api.client import PrivateDetailClient
+                from domeggook_API.workflows.product_sync import incremental, catalogue
+                from domeggook_API.api.private_sync import PrivateSyncClient, private_api_key
                 from domeggook_API.api.rate_limiter import RateLimiter
-                cfg=load_config(Path(spec['config']))
-                client=wrap(create_domeggook_client(load_api_keys(root),cfg),source,api='open')
-                state=Path(spec['state_dir']);state.mkdir(parents=True,exist_ok=True)
-                if mode!='daily': return catalogue(conn,client,state/(mode+'.json'),mode=mode)
-                class ReservedByTransport:
-                    def reserve_call(self): pass
-                private=PrivateSyncClient(os.environ['DOMEGGOOK_PRIVATE_API_KEY'],
-                    rate_limiter=RateLimiter(spec['private_rpm']),request_budget=ReservedByTransport())
-                wrap(private,source,'session','private')
-                return incremental(conn,private,client,state/'sync.json',
-                    provider_timezone=spec['provider_timezone'],
-                    **({'start':spec['initial_start']} if not (state/'sync.json').exists() else {}))
+                from domeggook_API.persistence.storage import load_state
+
+                state = Path(spec['state_dir'])
+                state.mkdir(parents=True, exist_ok=True)
+                key = private_api_key()
+                limiter = RateLimiter(spec['private_rpm'])
+                private = wrap(PrivateSyncClient(key, rate_limiter=limiter, request_budget=None),
+                               source, 'session', 'private')
+                details = wrap(PrivateDetailClient(key, limiter), source, api='private')
+                if mode != 'daily':
+                    return catalogue(conn, private, details, state / (mode + '.json'), mode=mode)
+                sync_path = state / 'sync.json'
+                first_range = {}
+                if not sync_path.exists():
+                    bootstrap = load_state(state / 'bootstrap.json')
+                    private_start = bootstrap.get('startedAt') if bootstrap.get('source') == 'private-search' else None
+                    first_range['start'] = private_start or spec.get('initial_start')
+                return incremental(conn, private, details, sync_path,
+                                   provider_timezone=spec['provider_timezone'],
+                                   **first_range)
             from ownerclan_API.config import load_config
             from ownerclan_API.api.factory import make_client
             from ownerclan_API.workflows.history_sync import collect_history,refresh_details

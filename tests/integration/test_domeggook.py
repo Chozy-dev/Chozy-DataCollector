@@ -6,7 +6,7 @@ import pytest
 from tests.unit.domeggook.test_private_sync import page, signal, detail
 from domeggook_API.workflows import product_sync as s
 from domeggook_API.api.client import CallBudgetExhausted
-from domeggook_API.persistence.storage import load_state
+from domeggook_API.persistence.storage import load_state, save_state
 
 START = "2026-11-19T00:00:00+00:00"
 END = "2026-11-19T01:00:00+00:00"
@@ -25,17 +25,8 @@ class Details:
         return {"domeggook": {"item": [detail(key, self.price, hidden=self.hidden) for key in ids]}}
 
 
-class Catalogue(Details):
-    def get_category_list(self):
-        return {"domeggook": {"items": {"item": [
-            {"code": "01_01_00_00_00", "name": "one"},
-            {"code": "02_01_00_00_00", "name": "two"}]}}}
-
-    def get_item_list(self, req):
-        assert req.market == "supply"
-        ids = (["10", "20"] if req.page == 1 else ["30"]) if req.category_code.startswith("01") else ["10"]
-        return {"domeggook": {"header": {"currentPage": req.page, "itemsPerPage": req.size},
-                              "list": {"item": [{"no": key} for key in ids]}}}
+def catalogue_search():
+    return Mock(search=Mock(side_effect=[page([signal("30"), signal("20")], [20]), page([signal("10")])]))
 
 
 def run(db, path, client=None, detail_client=None, **kw):
@@ -49,19 +40,21 @@ def count(db, table):
     return db.execute(f"SELECT count(*) AS n FROM {table}").fetchone()["n"]
 
 
-def test_catalogue_categories_pages_resume_and_reuse(db, tmp_path):
-    client, path = Catalogue(), tmp_path / "bootstrap.json"
-    assert s.catalogue(db, client, path, page_size=2, page_limit=1)["status"] == "paused"
+def test_private_catalogue_resumes_and_replaces_open_cursor(db, tmp_path):
+    private, details = catalogue_search(), Details()
+    path = tmp_path / "bootstrap.json"
+    save_state(path, {"mode": "bootstrap", "categoryIndex": 1, "page": 3})
+    assert s.catalogue(db, private, details, path, page_size=2, page_limit=1)["status"] == "paused"
     state = load_state(path)
-    assert state["page"] == 2 and state["categoryIndex"] == 0
-    assert s.catalogue(db, client, path, page_size=2)["status"] == "completed"
+    assert state["after"] == [20] and state["source"] == "private-search"
+    assert s.catalogue(db, private, details, path, page_size=2)["status"] == "completed"
+    assert private.search.call_args.kwargs["after"] == [20]
     assert count(db, "products") == count(db, "product_history") == 3
-    assert count(db, "product_events") == 0  # initial snapshots are NOT price events
-    assert client.calls == [["10", "20"], ["30"]]
+    assert count(db, "product_events") == 0
+    assert details.calls == [["30", "20"], ["10"]]
     assert load_state(path)["startedAt"] == state["startedAt"]
-    assert s.catalogue(db, client, path)["status"] == "completed"
-    assert s.catalogue(db, client, tmp_path / "discovery.json", mode="discovery", page_size=2)["status"] == "completed"
-    assert len(client.calls) == 2
+    assert s.catalogue(db, private, details, path)["status"] == "completed"
+    assert private.search.call_count == 2
 
 
 def test_sync_details_options_snapshots_signals_and_replay(db, tmp_path):
@@ -126,18 +119,21 @@ def test_old_inflight_detail_cannot_overwrite_new_sync(db, tmp_path):
     assert db.execute("SELECT price_info FROM products").fetchone()["price_info"]["supplyCurrentSupplyPrice"] == 200
 
 
-def test_catalogue_overlap_recovery_and_detail_failure(db, tmp_path):
-    path, client = tmp_path / "bootstrap.json", Catalogue()
-    client.fail = True
-    assert s.catalogue(db, client, path, page_size=2)["status"] == "failed"
-    assert load_state(path)["page"] == 1
+def test_catalogue_detail_failure_retries_page_and_recovery_refreshes(db, tmp_path):
+    path, details = tmp_path / "bootstrap.json", Details()
+    private = Mock(search=Mock(return_value=page([signal()])))
+    details.fail = True
+    assert s.catalogue(db, private, details, path)["status"] == "failed"
+    assert load_state(path)["after"] is None
+    assert count(db, "products") == 0
     assert run(db, tmp_path / "sync.json", detail_client=Details(price=200))["status"] == "completed"
-    client.fail = False
-    assert s.catalogue(db, client, path, page_size=2)["status"] == "completed"
-    assert db.execute("SELECT price_info FROM products WHERE external_product_id='10'").fetchone()["price_info"]["supplyCurrentSupplyPrice"] == 200
+    details.fail = False
+    assert s.catalogue(db, private, details, path)["status"] == "completed"
+    details.price = 300
+    recovery = tmp_path / "recovery.json"
+    assert s.catalogue(db, private, details, recovery, mode="recovery")["status"] == "completed"
+    assert db.execute("SELECT price_info FROM products WHERE external_product_id='10'").fetchone()["price_info"]["supplyCurrentSupplyPrice"] == 300
     assert count(db, "product_events") == 1
-    assert s.catalogue(db, client, tmp_path / "recovery.json", mode="recovery", page_size=2)["status"] == "completed"
-    assert db.execute("SELECT price_info FROM products WHERE external_product_id='10'").fetchone()["price_info"]["supplyCurrentSupplyPrice"] == 100
 
 
 def test_duplicate_page_cursor_is_failure(db, tmp_path):
@@ -197,27 +193,29 @@ def test_lost_commit_ack_replay_is_idempotent(db, tmp_path, monkeypatch):
     assert count(db, "product_events") == count(db, "product_history") == 1
 
 
-def test_catalogue_partial_page_commit_and_resume(db, tmp_path, monkeypatch):
+def test_catalogue_rolls_back_failed_page_and_resumes(db, tmp_path, monkeypatch):
     original = s.pg._save_product_batch
     def fail_second(conn, rows):
-        if rows[0]["external_product_id"] == "20":
-            raise RuntimeError("second batch failed")
-        return original(conn, rows)
+        original(conn, rows)
+        if rows[0]["external_product_id"] == "10":
+            raise RuntimeError("second page save failed")
     monkeypatch.setattr(s.pg, "_save_product_batch", fail_second)
-    path, client = tmp_path / "bootstrap.json", Catalogue()
-    assert s.catalogue(db, client, path, page_size=2, detail_batch_size=1)["status"] == "failed"
-    assert load_state(path)["page"] == 1 and count(db, "products") == 1
+    path, private, details = tmp_path / "bootstrap.json", catalogue_search(), Details()
+    assert s.catalogue(db, private, details, path, page_size=2)["status"] == "failed"
+    assert load_state(path)["after"] == [20] and count(db, "products") == 2
     monkeypatch.setattr(s.pg, "_save_product_batch", original)
-    assert s.catalogue(db, client, path, page_size=2, detail_batch_size=1)["status"] == "completed"
+    private.search.side_effect = None
+    private.search.return_value = page([signal("10")])
+    assert s.catalogue(db, private, details, path, page_size=2)["status"] == "completed"
     assert count(db, "products") == count(db, "product_history") == 3
-    assert client.calls.count(["10"]) == 1
+    assert details.calls == [["30", "20"], ["10"], ["10"]]
 
 
 def test_pending_catalogue_scope_cannot_change(db, tmp_path):
-    path, client = tmp_path / "bootstrap.json", Catalogue()
-    assert s.catalogue(db, client, path, page_size=2, page_limit=1)["status"] == "paused"
+    path, private, details = tmp_path / "bootstrap.json", catalogue_search(), Details()
+    assert s.catalogue(db, private, details, path, page_size=2, page_limit=1)["status"] == "paused"
     with pytest.raises(ValueError, match="page size"):
-        s.catalogue(db, client, path, page_size=3)
+        s.catalogue(db, private, details, path, page_size=3)
 
 
 def test_daily_range_overlaps_previous_watermark(db, tmp_path):

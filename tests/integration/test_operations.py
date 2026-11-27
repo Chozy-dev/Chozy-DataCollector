@@ -411,15 +411,15 @@ def test_adapter_dependency_and_pinned_clock(ops,db_factory,tmp_path,monkeypatch
     job={'job_id':'adapter','scope':{'config_hash':execution_fingerprint(cfg)},'metrics':{}}
     ops.execute("INSERT INTO ops_jobs(job_id,task,scheduled_at,scope) VALUES('adapter','domeggook',%s,%s)",(AT,Jsonb(job['scope'])));ops.commit()
     product(ops)
-    import domeggook_API.config as source_config
-    import domeggook_API.api.client as source_client
+    from domeggook_API.api.client import PrivateDetailClient
+    from domeggook_API.api.private_sync import PrivateSyncClient
     import domeggook_API.workflows.product_sync as workflow
-    monkeypatch.setattr(source_config,'load_config',lambda *_:object())
-    monkeypatch.setattr(source_config,'load_api_keys',lambda *_:['fixture'])
-    class Client: _session=object()
-    monkeypatch.setattr(source_client,'create_domeggook_client',lambda *_:Client())
     monkeypatch.setenv('DOMEGGOOK_PRIVATE_API_KEY','fixture')
-    def collect(conn,*args,**kwargs):
+    def collect(conn,private,details,*args,**kwargs):
+        assert isinstance(private, PrivateSyncClient)
+        assert isinstance(details, PrivateDetailClient)
+        assert private.session.api == details._session.api == 'private'
+        assert private.limiter is details._credentials[0].rate_limiter
         conn.execute("UPDATE products SET product_name='collected' WHERE platform='domeggook'")
         conn.commit()
         return {'status':'completed'}
