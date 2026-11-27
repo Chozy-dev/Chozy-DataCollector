@@ -10,7 +10,7 @@
 | --- | --- |
 | PostgreSQL 기존 수집기 | `POSTGRES_ENABLED/HOST/PORT/DB/USER/PASSWORD` |
 | 오너클랜 | `OWNERCLAN_USERNAME/PASSWORD/ENV` |
-| 도매매 | `DOMEGGOOK_OpenAPI_KEY`, Private 승인 후 `DOMEGGOOK_PRIVATE_API_KEY` (통합 동기화) |
+| 도매매 | `DOMEGGOOK_PRIVATE_API_KEY` (통합·독립 Private 수집), `DOMEGGOOK_OpenAPI_KEY` (기존 Open 수집) |
 | 쿠팡 | `COUPANG_ACCESS_KEY/SECRET_KEY` |
 | 네이버 검색광고 | `NAVER_AD_API_KEY/SECRET_KEY/CUSTOMER_ID` |
 | 네이버 API HUB | `NAVER_HUB_KEY_ID/KEY` |
@@ -142,6 +142,12 @@ live_e2e는 실제 변경 피드 앞부분의 약 5,000개 key 표본을 대상�
 쿠팡·네이버 계획에 실제 호출·저장을 선택하려면 --execute를 추가한다. 도매매 Private sync는 승인 후 확인한 provider-timezone과 초기 start를 지정하며 미완료 재개 시 범위를 바꾸지 않는다. 오너클랜 legacy-categories는 명시적으로 선택하는 기존 경로다.
 
 도매매 동기화의 현재 진입점은 `domeggook_API.workflows.sync_cli`다. 기존 `domeggook_API.workflows.stage4_cli` 명령과 `stage4` import는 같은 구현으로 연결하는 호환용 파일로 남겼다. 새 설정·명령에는 기능 이름을 사용한다. 기존 설정의 `data/state/stage4`는 재개 데이터 경로이므로 이름만 바꾸어 새 작업을 시작하지 않는다. Compose command와 현재 실행 중인 수집 컨테이너의 시작 명령은 변경하지 않았다.
+
+### 도매매 일일 동기화
+
+1. 운영 실행 호스트에서 Private 키와 등록 IP로 검색이 성공하는지 확인한다. 통합 설정의 `sources.domeggook`에 기존 `state_dir`, `provider_timezone`, `initial_start`, `private_rpm`과 계정 예산을 설정한다. 11월 27일 실측은 로컬에서 KST 기준 요청값으로 성공했다. 운영 시간대와 허용 호출량은 실제 환경에서 확인한다. [호출 계약](API_CONTRACTS.md#private-상품-검색과-상세)
+2. 최초 적재·신규 발견·복구와 일일 동기화 모두 Private 검색과 `getItemViewES` 권한을 사용한다. Open 카테고리 체크포인트에서 전환할 때는 Private 첫 페이지부터 읽는다. 첫 통합 일일 동기화는 Private bootstrap의 `startedAt`부터 변경분을 읽는다. Private bootstrap 상태가 없으면 `initial_start`를 사용한다. 독립 CLI는 `--state-dir`과 두 API가 공유하는 운영 예산 `--private-daily-budget`, `--private-rpm`을 받는다. 첫 독립 `sync`에는 시간대 오프셋이 포함된 `--start`와 `--provider-timezone`을 지정한다.
+3. 미완료 실행은 같은 `sync.json`으로 잇는다. 기존 범위·시간대·페이지 크기를 유지하고 독립 CLI 재개에는 `--start`·`--end`를 생략한다. 마지막 완료 범위와 상세 저장 결과를 함께 확인한다. 별도 장애 구간이나 검색에서 빠진 종료·채널 이탈·삭제는 원본 신호와 필요 시 별도 복구 조회로 확인한다.
 
 ## 개발 도구와 배포
 

@@ -1,13 +1,20 @@
 """Private responses here are DOCUMENTATION-BASED fixtures, never live evidence."""
 from unittest.mock import Mock
+from urllib.parse import parse_qs, urlsplit
 import requests
 import pytest
 
 from domeggook_API.api.private_sync import PrivateSyncClient, parse_search_page
-from domeggook_API.api.client import DomeggookClient, CallBudgetExhausted, DomeggookHttpError, DomeggookApiError
+from domeggook_API.api.client import (
+    DomeggookClient, PrivateDetailClient, CallBudgetExhausted, DomeggookHttpError, DomeggookApiError,
+)
 from domeggook_API.api.rate_limiter import RateLimiter
 from domeggook_API.workflows.run_budget import RunBudget, PersistentCallBudget
 from domeggook_API.workflows.product_sync import sync_signal
+
+
+START = "2026-11-19 00:00:00"
+END = "2026-11-19 23:59:59"
 
 
 def page(rows=(), after=None):
@@ -36,11 +43,46 @@ def private(status=200, payload=None, budget=None, retries=0):
 
 def test_documented_request_and_response():
     client, session = private(payload=page([signal()], [10]))
-    assert parse_search_page(client.search("start", "end", after=[20])) == ([signal()], [10])
+    assert parse_search_page(client.search(START, END, after=[20])) == ([signal()], [10])
     args = session.post.call_args.kwargs
     assert args["json"]["search_after"] == [20]
     assert args["headers"] == {"Authorization": "Bearer TEST_ONLY"}
-    assert args["json"]["query"]["bool"]["filter"][1]["range"]["dateModify"]["gte"] == "start"
+    assert args["json"]["query"]["bool"]["filter"][1]["range"]["dateModify"] == {"gte": START, "lte": END}
+
+
+def test_private_catalogue_request_and_es_detail_share_budget():
+    budget = RunBudget(2)
+    search, session = private(budget=budget)
+    search.search()
+    body = session.post.call_args.kwargs["json"]
+    assert body["query"]["bool"]["filter"] == [{"term": {"channel.supply": True}}]
+    assert "search_after" not in body
+
+    session.get.return_value = Mock(status_code=200, json=lambda: {"domeggook": {"item": [detail()]}})
+    details = PrivateDetailClient("PRIVATE_FIXTURE", RateLimiter(100), session=session, request_budget=budget)
+    details.get_item_view(["10", "9"])
+    params = parse_qs(urlsplit(session.get.call_args.args[0]).query)
+    assert params == {"ver": ["4.0"], "mode": ["getItemViewES"], "om": ["json"],
+                      "no": ["10,9"], "market": ["supply"], "aid": ["PRIVATE_FIXTURE"]}
+    with pytest.raises(CallBudgetExhausted):
+        details.get_item_view(["10"])
+    assert session.get.call_count == 1
+
+
+@pytest.mark.parametrize(("start", "end"), [
+    ("2026-11-19T00:00:00+09:00", END),
+    (START, "2026-11-19 23:59:59Z"),
+    ("2026-11-31 00:00:00", END),
+    ("2026-11-19 0:00:00", END),
+    (END, START),
+])
+def test_invalid_date_modify_range_does_not_send_or_consume_budget(start, end):
+    client, session = private()
+    with pytest.raises(ValueError, match="Private dateModify"):
+        client.search(start, end)
+    session.post.assert_not_called()
+    client.limiter.wait.assert_not_called()
+    assert client.budget.used_api_calls == 0
 
 
 @pytest.mark.parametrize("payload", [{}, {"result": False}, {"result": True, "data": {}},
@@ -54,7 +96,7 @@ def test_malformed_pages_fail_closed(payload):
 def test_http_failure_is_distinct(status):
     client, session = private(status=status)
     with pytest.raises(DomeggookHttpError) as caught:
-        client.search("a", "b")
+        client.search(START, END)
     assert caught.value.status_code == status
     assert session.post.call_count == 1
 
@@ -64,7 +106,7 @@ def test_retry_consumes_budget_and_does_not_send_extra_request(monkeypatch):
     budget = RunBudget(1)
     client, session = private(status=429, budget=budget, retries=3)
     with pytest.raises(CallBudgetExhausted):
-        client.search("a", "b")
+        client.search(START, END)
     assert session.post.call_count == budget.used_api_calls == 1
 
 
@@ -73,12 +115,12 @@ def test_network_retry_and_invalid_json(monkeypatch):
     client, session = private(retries=1)
     session.post.side_effect = requests.Timeout()
     with pytest.raises(DomeggookApiError, match="Timeout"):
-        client.search("a", "b")
+        client.search(START, END)
     assert client.budget.used_api_calls == 2
     session.post.side_effect = None
     session.post.return_value.json = Mock(side_effect=ValueError())
     with pytest.raises(DomeggookApiError, match="JSON"):
-        client.search("a", "b")
+        client.search(START, END)
 
 
 def test_signal_dedupe_no_invented_time_or_prices():

@@ -52,15 +52,15 @@ Open API 목록·일반 상세, 도매매 채널 상세, Private 변경 검색�
 
 일반 상세의 판매자 만족도가 ES 상세에는 없을 수 있어 ES 하나로 모든 점수 입력을 대체할 수 없다. 배송 조건표·수량별 비례·착불·무료를 숫자 하나로 축약하지 않는다. 도매매 배송이 없으면 도매꾹 배송으로 임의 채우지 않는다.
 
-### Private 변경 검색
+### Private 상품 검색과 상세
 
-승인 대기 상태다. 문서 기반 구현은 Bearer 인증, 최대 size 100, dateModify 범위와 opaque searchAfter 배열을 사용한다. **성공 실응답·시간대·종료 규칙·지연·보존 기간·삭제/채널 이탈 포착·실제 제한은 미확정**이다. getAllSupplyChk를 같은 기능의 대체로 간주하지 않는다.
+`POST https://product.domeggook.com/api/v1/product/_search`에 Private 키를 Bearer로 보낸다. `dateModify.gte/lte`는 최종 수정시각을 기준으로 상품을 찾는 양끝 포함 범위다. 요청값은 `YYYY-MM-DD HH:mm:ss`이며 날짜 형식과 범위를 호출 전에 검증한다. 페이지당 최대 100개를 요청할 수 있고, 다음 페이지에는 응답의 `searchAfter` 배열을 `search_after`로 그대로 보낸다. HTTP 상태와 본문의 `result`를 함께 확인한다. 제공처 시간대 계약과 색인 지연은 확인이 필요하다. [공식 상품정보 동기화 문서](https://openapi.domeggook.com/ko/articles/상품정보-동기화-6b5f900f)
 
-HTTP 상태와 본문의 `result`·오류 코드를 함께 판정한다. 변경 검색은 승인되지 않은 IP로 거부됐고 같은 Private 키의 ES 상세는 성공했다. 호출 조건과 최신 결과는 [VALIDATION](VALIDATION.md#도매매-private-동기화-재호출)에 있다. 변경 검색의 한도는 ES 상세의 과거 제한과 별도로 검증한다.
+최초 적재·신규 발견·복구는 `channel.supply=true`를 사용해 상품번호 내림차순으로 전체 페이지를 읽는다. 일일 수집은 `dateModify` 범위를 추가한다. 각 페이지의 상품번호는 최대 100개까지 Private `getItemViewES`로 상세 조회한다. ES 상세는 휴가 정보를 제공한다. 만족도와 후기 수가 응답에 없으면 점수의 기존 결측 정책을 적용한다. [공식 ES 상세 문서](https://openapi.domeggook.com/ko/articles/상품상세정보조회ES-기반-a4572234)
 
 dateModify는 raw에 남기되 사건 발생시각으로 만들지 않는다. 결과는 내부 `modification_signal`, occurred_at=NULL, ambiguous identity로 저장한다. 원본 전후값·실제 사건 종류를 추정하지 않는다. `channel.supply=true`는 현재 채널에서 이탈한 상품을 놓칠 수 있어 승인 후 복구 정책을 검토한다.
 
-기존 Open API의 full/detail-first daily도 보존되어 있다. 새 Private 경로와 기존 경로의 실행 차이는 [RUNBOOK](RUNBOOK.md)에 정리한다.
+[검증 및 시간 추정](VALIDATION.md#도매매-private-전체일일-수집) · [실행 절차](RUNBOOK.md#도매매-일일-동기화)
 
 ## 쿠팡
 

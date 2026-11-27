@@ -1,8 +1,10 @@
-"""Official documentation contract, NOT a measured successful API contract.
+"""Client for the Private product synchronization search API.
 
 https://openapi.domeggook.com/ko/articles/상품정보-동기화-6b5f900f
 No provider RPM is assumed. Callers supply an operational limiter and budget.
 """
+from datetime import datetime
+import os
 import time
 import requests
 from product_data_collector.operations.budget import SupplierSession
@@ -11,6 +13,26 @@ from .client import (DomeggookApiError, DomeggookHttpError, DomeggookResponseErr
                      DomeggookTimeoutError, consume_budget, _retry_after_seconds)
 
 ENDPOINT = "https://product.domeggook.com/api/v1/product/_search"
+DATE_MODIFY_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def private_api_key():
+    key = os.getenv("DOMEGGOOK_PRIVATE_API_KEY") or os.getenv("DOMEGGOOK_PrivateAPI_KEY")
+    if not key:
+        raise ValueError("Domeggook Private API key is required")
+    return key
+
+
+def validate_date_modify_range(start, end):
+    for value in (start, end):
+        try:
+            canonical = datetime.strptime(value, DATE_MODIFY_FORMAT).strftime(DATE_MODIFY_FORMAT)
+        except (TypeError, ValueError):
+            canonical = None
+        if canonical is None or value != canonical:
+            raise ValueError("Private dateModify must use YYYY-MM-DD HH:mm:ss")
+    if start > end:
+        raise ValueError("Private dateModify start must be at or before end")
 
 
 class PrivateSyncClient:
@@ -23,13 +45,15 @@ class PrivateSyncClient:
         self.timeout = timeout
         self.max_retries = max_retries
 
-    def search(self, start, end, *, after=None, size=100):
+    def search(self, start=None, end=None, *, after=None, size=100):
         if not 1 <= size <= 100:
             raise ValueError("Private search size must be 1..100")
-        body = {"size": size, "track_total_hits": True,
-                "query": {"bool": {"filter": [
-                    {"term": {"channel.supply": True}},
-                    {"range": {"dateModify": {"gte": start, "lte": end}}}]}},
+        filters = [{"term": {"channel.supply": True}}]
+        if start is not None or end is not None:
+            validate_date_modify_range(start, end)
+            filters.append({"range": {"dateModify": {"gte": start, "lte": end}}})
+        body = {"size": size, "track_total_hits": after is None,
+                "query": {"bool": {"filter": filters}},
                 "sort": [{"no": {"order": "desc"}}]}
         if after is not None:
             body["search_after"] = after

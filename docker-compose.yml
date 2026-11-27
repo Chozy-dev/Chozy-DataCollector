@@ -41,7 +41,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-      DOMEGGOOK_OpenAPI_KEY: ${DOMEGGOOK_OpenAPI_KEY:?DOMEGGOOK_OpenAPI_KEY is required}
+      DOMEGGOOK_OpenAPI_KEY: ${DOMEGGOOK_OpenAPI_KEY:-}
       OWNERCLAN_USERNAME: ${OWNERCLAN_USERNAME:?OWNERCLAN_USERNAME is required}
       OWNERCLAN_PASSWORD: ${OWNERCLAN_PASSWORD:?OWNERCLAN_PASSWORD is required}
       COLLECTOR_LIMIT: ${COLLECTOR_LIMIT:-}
@@ -70,6 +70,8 @@ services:
       <<: *shared-budget-environment
       # Passed explicitly by the operator; never assembled from production .env.
       REVIEWED_COLLECTOR_DSN: ${REVIEWED_COLLECTOR_DSN:-}
+      DOMEGGOOK_PRIVATE_API_KEY: ${DOMEGGOOK_PRIVATE_API_KEY:-}
+      DOMEGGOOK_PrivateAPI_KEY: ${DOMEGGOOK_PrivateAPI_KEY:-}
       OWNERCLAN_USERNAME: ${OWNERCLAN_USERNAME:-}
       OWNERCLAN_PASSWORD: ${OWNERCLAN_PASSWORD:-}
       OWNERCLAN_ENV: ${OWNERCLAN_ENV:-production}
@@ -84,6 +86,11 @@ services:
       - type: bind
         source: ./ownerclan_API/data
         target: /app/ownerclan_API/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./domeggook_API/data
+        target: /app/domeggook_API/data
         bind:
           create_host_path: false
     # No dependency starts DB/collectors. Default command is an offline plan.

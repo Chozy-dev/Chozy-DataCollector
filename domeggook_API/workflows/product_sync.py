@@ -5,10 +5,9 @@ from zoneinfo import ZoneInfo
 from copy import deepcopy
 import json
 
-from ..api.client import ListRequest, CallBudgetExhausted, DomeggookHttpError
-from ..api.private_sync import parse_search_page
-from ..services.categories import parse_searchable_categories
-from ..services.parsing import parse_list_items, parse_list_header, parse_product_id, parse_detail_products
+from ..api.client import CallBudgetExhausted, DomeggookHttpError
+from ..api.private_sync import DATE_MODIFY_FORMAT, parse_search_page
+from ..services.parsing import parse_detail_products
 from ..persistence.storage import FileLock, load_state, save_state
 from product_data_collector.domain.product_events import ProductEvent, utc
 from product_data_collector.domain.current_state import digest
@@ -45,7 +44,7 @@ def detail_rows(client, ids):
     observed = clock()  # conservative request start protects against in-flight older replies
     products, failures = parse_detail_products(client.get_item_view(ids), observed)
     rows = [snapshot_row("domeggook", observed, p) for p in products]
-    if failures or {r["external_product_id"] for r in rows} != set(ids):
+    if failures or len(rows) != len(ids) or {r["external_product_id"] for r in rows} != set(ids):
         raise ValueError("Missing or mismatched product details")
     # An error envelope or partial empty detail must never complete a page.
     if any(not r["product_name"] or r["prices_payload"].get("supplyCurrentSupplyPrice") in (None, "") for r in rows):
@@ -71,91 +70,67 @@ def _failure(state, exc, path):
             "reason": type(exc).__name__, "failureCount": 0 if isinstance(exc, CallBudgetExhausted) else 1}
 
 
-def catalogue(connection, client, state_path, *, mode="bootstrap", page_size=100,
-              detail_batch_size=50, page_limit=None):
-    """Independent bootstrap/discovery/recovery checkpoints. Memory <= one page.
-
-    Existing usable supply snapshots are reused; recovery explicitly refreshes all
-    encountered products. Listing pagination is live, so a later sweep is needed.
-    """
+def catalogue(connection, client, detail_client, state_path, *, mode="bootstrap",
+              page_size=100, page_limit=None):
+    """Page through the Private catalogue and commit detail before saving its cursor."""
     if mode not in {"bootstrap", "discovery", "recovery"}:
         raise ValueError("Invalid catalogue mode")
-    if not 1 <= page_size <= 150 or not 1 <= detail_batch_size <= 100 or (page_limit is not None and page_limit < 1):
+    if not 1 <= page_size <= 100 or (page_limit is not None and page_limit < 1):
         raise ValueError("Invalid catalogue limits")
     with job_lock(connection, state_path, mode):
         state = load_state(state_path)
-        if state.get("completed") and mode == "bootstrap":
-            return {"status": "completed", "failureCount": 0, "continuousCoverageVerified": False,
-                    "snapshotComplete": True, "incrementalCatchupRequired": True,
-                    "syncRequiredFrom": state["startedAt"]}
-        if not state or state.get("completed"):
-            state = {"startedAt": clock(), "categoryIndex": 0, "page": 1,
-                     "completed": False, "mode": mode, "pageSize": page_size,
-                     "pageCount": 0, "processedCount": 0}
-        if state["mode"] != mode:
+        if state and state.get("mode") != mode:
             raise ValueError("Checkpoint belongs to another job")
+        if state.get("source") == "private-search" and state.get("completed") and mode == "bootstrap":
+            return _catalogue_complete(state)
+        # Open category/page checkpoints cannot be translated to a Private cursor.
+        if state.get("source") != "private-search" or state.get("completed"):
+            state = {"startedAt": clock(), "source": "private-search", "after": None,
+                     "lastProductId": None, "completed": False, "mode": mode,
+                     "pageSize": page_size, "pageCount": 0, "processedCount": 0}
         if state["pageSize"] != page_size:
             raise ValueError("Cannot change page size while resuming catalogue")
-        save_state(state_path, state)  # durable baseline BEFORE first API request
+        save_state(state_path, state)
         pages = 0
         try:
-            if "categories" not in state:
-                state["categories"] = [c.code for c in parse_searchable_categories(client.get_category_list())]
-                save_state(state_path, state)
-            while state["categoryIndex"] < len(state["categories"]):
-                category = state["categories"][state["categoryIndex"]]
-                payload = client.get_item_list(ListRequest("supply", "da", page_size,
-                    page=state["page"], category_code=category))
-                root = payload.get("domeggook", payload)
-                if not isinstance(root, dict) or not any(k in root for k in ("list", "items", "itemList", "data")):
-                    raise ValueError("List response missing item container")
-                items = parse_list_items(payload)
-                ids = list(dict.fromkeys(parse_product_id(i) for i in items))
-                if None in ids:
-                    raise ValueError("List item missing product ID")
-                existing = connection.execute("SELECT external_product_id FROM products WHERE platform='domeggook' "
-                    "AND external_product_id=ANY(%s) AND current_observed_at IS NOT NULL "
-                    "AND product_name IS NOT NULL "
-                    "AND price_info->>'supplyCurrentSupplyPrice' IS NOT NULL", (ids,)).fetchall()
-                reusable = {r["external_product_id"] for r in existing} if mode != "recovery" else set()
-                missing = [key for key in ids if key not in reusable]
-                for offset in range(0, len(missing), detail_batch_size):
-                    rows = detail_rows(client, missing[offset:offset + detail_batch_size])
-                    pg._save_product_batch(connection, rows)
-                    connection.commit()  # partial page commits replay safely after failure
+            while True:
+                rows, after = parse_search_page(client.search(after=state["after"], size=page_size))
+                ids = [row["no"] for row in rows]
+                order = [int(key) for key in ids]
+                if (len(ids) > page_size or
+                        any(previous <= current for previous, current in zip(order, order[1:])) or
+                        (order and state["lastProductId"] is not None and order[0] >= state["lastProductId"]) or
+                        (after is not None and after == state["after"])):
+                    raise ValueError("Private catalogue returned a repeated or out-of-order page")
+                if ids:
+                    pg._save_product_batch(connection, detail_rows(detail_client, ids))
                 connection.commit()
-                next_state = deepcopy(state)
-                header = parse_list_header(payload)
-                if header.get("currentPage") is not None and int(header["currentPage"]) != state["page"]:
-                    raise ValueError("List returned mismatched page")
-                size = int(header.get("itemsPerPage") or page_size)
-                if size < 1:
-                    raise ValueError("Invalid list page size")
-                if len(items) < size:
-                    next_state.update(categoryIndex=state["categoryIndex"] + 1, page=1)
-                else:
-                    next_state["page"] += 1
-                next_state["completed"] = next_state["categoryIndex"] == len(state["categories"])
-                next_state["pageCount"] += 1
-                next_state["processedCount"] += len(ids)
-                if next_state["completed"]:
+                next_state = dict(state, after=after, lastProductId=order[-1] if order else state["lastProductId"],
+                                  pageCount=state["pageCount"] + 1,
+                                  processedCount=state["processedCount"] + len(ids), completed=after is None)
+                if after is None:
                     next_state["completedAt"] = clock()
                 save_state(state_path, next_state)
                 state = next_state
                 pages += 1
-                if page_limit and pages >= page_limit and not state["completed"]:
+                if after is None:
+                    return _catalogue_complete(state)
+                if page_limit and pages >= page_limit:
                     return {"status": "paused", "reason": "page_limit", "failureCount": 0}
-            return {"status": "completed", "failureCount": 0, "continuousCoverageVerified": False,
-                    "snapshotComplete": True, "incrementalCatchupRequired": True,
-                    "syncRequiredFrom": state["startedAt"]}
         except Exception as exc:
             connection.rollback()
             return _failure(state, exc, state_path)
 
 
+def _catalogue_complete(state):
+    return {"status": "completed", "failureCount": 0, "continuousCoverageVerified": False,
+            "snapshotComplete": True, "incrementalCatchupRequired": True,
+            "syncRequiredFrom": state["startedAt"]}
+
+
 def _provider_time(value, provider_timezone):
     # Documentation has no timezone: require explicit operator configuration.
-    return utc(value).astimezone(ZoneInfo(provider_timezone)).strftime("%Y-%m-%d %H:%M:%S")
+    return utc(value).astimezone(ZoneInfo(provider_timezone)).strftime(DATE_MODIFY_FORMAT)
 
 
 def incremental(connection, private_client, detail_client, state_path, *, start=None,

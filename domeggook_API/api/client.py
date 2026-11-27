@@ -218,6 +218,21 @@ def create_domeggook_client(
     )
 
 
+class PrivateDetailClient(DomeggookClient):
+    """Private ES detail uses the same transport and response envelope as item view."""
+
+    def get_item_view(self, product_ids: list[str]) -> dict[str, Any]:
+        if not 1 <= len(product_ids) <= 100:
+            raise ValueError("getItemViewES requires 1..100 product ids")
+        return self._get({
+            "ver": "4.0",
+            "mode": "getItemViewES",
+            "om": "json",
+            "no": ",".join(product_ids),
+            "market": "supply",
+        })
+
+
 def create_api_key_rate_limiter(config: DomeggookConfig) -> RateLimiter:
     return RateLimiter(
         config.request.max_requests_per_minute,
